@@ -21,22 +21,18 @@ Output is in `dist/`.
 
 ## Deploy (GitHub Pages)
 
-Pushes to `main` publish the site to the `gh-pages` branch.
+Site URL: https://yknighth-star.github.io/qingyue/
 
-Site URL:
+**重要：若出现 `/src/main.ts` 404，说明 Pages 指到了源码分支，请改设置：**
 
-https://yknighth-star.github.io/qingyue/
+1. 打开 https://github.com/yknighth-star/qingyue/settings/pages  
+2. Source 选 **Deploy from a branch**  
+3. 任选其一（推荐 A）：
+   - **A.** Branch = **`gh-pages`**，Folder = **`/ (root)`**
+   - **B.** Branch = **`main`**，Folder = **`/docs`**
+4. Save 后等 1–2 分钟，强制刷新页面（清站点数据）
 
-### First-time: enable Pages (required)
-
-1. Open https://github.com/yknighth-star/qingyue/settings/pages
-2. Under **Build and deployment** → **Source**, choose **Deploy from a branch**
-3. Branch must be **gh-pages** / **/ (root)** → Save  
-   **Do not** select `main` — that publishes the Vite source `index.html` and breaks PDF/assets.
-4. Wait for Actions `Deploy GitHub Pages` to finish
-5. Hard-refresh the site (or clear site data) so the old Service Worker is dropped
-
-Workflow: https://github.com/yknighth-star/qingyue/actions
+正确页面源码应包含 `/qingyue/assets/...js`，而不是 `/src/main.ts`。
 
 ## Library folder
 
