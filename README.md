@@ -19,16 +19,20 @@ Output is in `dist/`.
 
 ## Deploy (GitHub Pages)
 
-Pushes to `main` trigger GitHub Actions deployment.
+Pushes to `main` publish the site to the `gh-pages` branch.
 
 Site URL:
 
 https://yknighth-star.github.io/h5-ebook-reader/
 
-First-time setup (repo Settings → Pages):
+### First-time: enable Pages (required)
 
-1. Source: **GitHub Actions**
-2. Wait for the `Deploy GitHub Pages` workflow to finish
+1. Open https://github.com/yknighth-star/h5-ebook-reader/settings/pages
+2. Under **Build and deployment** → **Source**, choose **Deploy from a branch**
+3. Branch: **gh-pages** / **/ (root)** → Save
+4. Wait 1–2 minutes after the Actions workflow finishes
+
+Workflow: https://github.com/yknighth-star/h5-ebook-reader/actions
 
 ## Library folder
 
