@@ -5,8 +5,8 @@ import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import path from 'node:path'
 
-// GitHub Pages project site: https://yknighth-star.github.io/h5-ebook-reader/
-const base = process.env.GITHUB_PAGES === 'true' ? '/h5-ebook-reader/' : '/'
+// GitHub Pages project site: https://yknighth-star.github.io/qingyue/
+const base = process.env.GITHUB_PAGES === 'true' ? '/qingyue/' : '/'
 
 /** Copy PDF.js worker + .nojekyll after all other plugins write dist. */
 function pdfWorkerAndPagesPlugin(): Plugin {
