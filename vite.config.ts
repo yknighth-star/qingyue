@@ -1,18 +1,44 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { VitePWA } from 'vite-plugin-pwa'
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
+import path from 'node:path'
 
 // GitHub Pages project site: https://yknighth-star.github.io/h5-ebook-reader/
 const base = process.env.GITHUB_PAGES === 'true' ? '/h5-ebook-reader/' : '/'
+
+/** Copy PDF.js worker into public/ (dev) and dist/ (build) + ensure .nojekyll for GitHub Pages. */
+function pdfWorkerAndPagesPlugin(): Plugin {
+  const workerSrc = path.resolve('node_modules/pdfjs-dist/build/pdf.worker.min.mjs')
+
+  const copyWorker = (destDir: string) => {
+    if (!existsSync(workerSrc)) return
+    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
+    copyFileSync(workerSrc, path.join(destDir, 'pdf.worker.min.mjs'))
+  }
+
+  return {
+    name: 'pdf-worker-and-pages',
+    buildStart() {
+      copyWorker(path.resolve('public'))
+    },
+    closeBundle() {
+      const outDir = path.resolve('dist')
+      copyWorker(outDir)
+      writeFileSync(path.join(outDir, '.nojekyll'), '')
+    },
+  }
+}
 
 export default defineConfig({
   base,
   plugins: [
     vue(),
+    pdfWorkerAndPagesPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg'],
+      includeAssets: ['favicon.svg', 'pdf.worker.min.mjs'],
       manifest: {
         name: '本地电子书阅读器',
         short_name: '书库',
@@ -32,9 +58,11 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        // Include .mjs so PDF worker is cached; denylist so SPA fallback won't return HTML for it
+        globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         navigateFallback: 'index.html',
+        navigateFallbackDenylist: [/^\/_/, /\/assets\//, /\.mjs$/i, /pdf\.worker/i],
       },
     }),
   ],
@@ -45,8 +73,13 @@ export default defineConfig({
   },
   optimizeDeps: {
     include: ['epubjs', 'pdfjs-dist'],
+    exclude: ['pdfjs-dist/build/pdf.worker.min.mjs'],
   },
   worker: {
     format: 'es',
+  },
+  build: {
+    // Keep worker as a separate file with predictable handling
+    assetsInlineLimit: 0,
   },
 })

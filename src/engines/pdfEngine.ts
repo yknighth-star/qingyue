@@ -9,10 +9,8 @@ import { buildSelectionEvent, selectionRectFromSel } from '@/utils/selectionTool
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
 import { indexOfIgnoreCase } from '@/utils/searchText'
 
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString()
+// Stable public path (copied in vite plugin). Works with GitHub Pages base + avoids hashed .mjs SW issues.
+pdfjs.GlobalWorkerOptions.workerSrc = `${import.meta.env.BASE_URL}pdf.worker.min.mjs`
 
 export class PdfEngine implements ReaderEngine {
   private pdf: PDFDocumentProxy | null = null
