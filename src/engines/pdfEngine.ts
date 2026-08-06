@@ -259,7 +259,15 @@ export class PdfEngine implements ReaderEngine {
       const useOcr = ocr && p <= ocrLimit
       if (useOcr) opts?.onOcrProgress?.({ page: p, total: ocrLimit })
       else opts?.onSearchProgress?.({ page: p, total })
-      const text = await this.getPageText(p, useOcr, opts?.signal)
+      let text: string
+      try {
+        text = await this.getPageText(p, useOcr, opts?.signal)
+      } catch (err) {
+        if (opts?.signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+          throw new DOMException('Aborted', 'AbortError')
+        }
+        throw err
+      }
       let idx = 0
       let pageAdded = false
       while (hits.length < 40) {
@@ -464,7 +472,9 @@ export class PdfEngine implements ReaderEngine {
       this.ocrPages.add(pageNum)
       return text
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err
+      if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+        throw new DOMException('Aborted', 'AbortError')
+      }
       console.warn('OCR page failed', pageNum, err)
       this.textCache.set(pageNum, embedded)
       return embedded
@@ -492,12 +502,28 @@ export class PdfEngine implements ReaderEngine {
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, w, h)
 
-    await page.render({
+    const task = page.render({
       canvasContext: ctx,
       viewport,
       background: 'rgb(255,255,255)',
       intent: 'print',
-    }).promise
+    })
+    const onAbortRender = () => {
+      try {
+        task.cancel()
+      } catch {
+        /* */
+      }
+    }
+    signal?.addEventListener('abort', onAbortRender)
+    try {
+      await task.promise
+    } catch (err) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      throw err
+    } finally {
+      signal?.removeEventListener('abort', onAbortRender)
+    }
 
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
 
@@ -509,7 +535,12 @@ export class PdfEngine implements ReaderEngine {
     canvas.width = 0
     canvas.height = 0
     if (!blob || blob.size < 200) return ''
-    return recognizeImage(blob, signal)
+    try {
+      return await recognizeImage(blob, signal)
+    } catch (err) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      throw err
+    }
   }
 
   private async renderPage(pageNum: number) {

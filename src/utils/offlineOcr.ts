@@ -8,6 +8,8 @@ export type OcrProgress = {
 }
 
 let workerPromise: Promise<Worker> | null = null
+/** Bumped on terminate so in-flight createWorker discards the result. */
+let workerGen = 0
 
 function assetBase() {
   const base = import.meta.env.BASE_URL || '/'
@@ -23,9 +25,31 @@ function absUrl(pathFromRoot: string) {
   return `${assetBase()}${path}`
 }
 
+function abortError() {
+  return new DOMException('Aborted', 'AbortError')
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw abortError()
+}
+
+/** Rejects when signal aborts (or immediately if already aborted). */
+function whenAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    if (signal.aborted) {
+      reject(abortError())
+      return
+    }
+    signal.addEventListener('abort', () => reject(abortError()), { once: true })
+  })
+}
+
 /** Lazy singleton Tesseract worker — Simplified Chinese, fully local assets. */
-export function getOcrWorker(): Promise<Worker> {
+export function getOcrWorker(signal?: AbortSignal): Promise<Worker> {
+  throwIfAborted(signal)
+
   if (!workerPromise) {
+    const gen = workerGen
     workerPromise = (async () => {
       // chi_sim only: eng+chi often emits noisy "Detected N diacritics" on Chinese scans
       const worker = await createWorker('chi_sim', OEM.LSTM_ONLY, {
@@ -38,29 +62,68 @@ export function getOcrWorker(): Promise<Worker> {
           /* suppress tesseract.js progress logs */
         },
       })
+      if (gen !== workerGen) {
+        try {
+          await worker.terminate()
+        } catch {
+          /* */
+        }
+        throw abortError()
+      }
       await worker.setParameters({
         tessedit_pageseg_mode: PSM.AUTO,
         preserve_interword_spaces: '1',
         user_defined_dpi: '300',
       })
+      if (gen !== workerGen) {
+        try {
+          await worker.terminate()
+        } catch {
+          /* */
+        }
+        throw abortError()
+      }
       return worker
     })().catch((err) => {
-      workerPromise = null
+      if (workerPromise && gen === workerGen) workerPromise = null
       throw err
     })
   }
-  return workerPromise
+
+  const pending = workerPromise
+  if (!signal) return pending
+  return Promise.race([pending, whenAborted(signal)])
 }
 
 export async function recognizeImage(
   image: HTMLCanvasElement | Blob | string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-  const worker = await getOcrWorker()
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-  const { data } = await worker.recognize(image)
-  return normalizeOcrText(data.text || '')
+  throwIfAborted(signal)
+
+  const run = async () => {
+    const worker = await getOcrWorker(signal)
+    throwIfAborted(signal)
+    const { data } = await worker.recognize(image)
+    throwIfAborted(signal)
+    return normalizeOcrText(data.text || '')
+  }
+
+  const runP = run()
+  // Avoid unhandledrejection when race loses to abort
+  void runP.catch(() => {})
+
+  try {
+    if (!signal) return await runP
+    return await Promise.race([runP, whenAborted(signal)])
+  } catch (err) {
+    if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+      // Kill in-flight recognize / createWorker so cancel is immediate
+      void terminateOcrWorker()
+      throw abortError()
+    }
+    throw err
+  }
 }
 
 /** Collapse "螃 蟹" style gaps left by OCR. */
@@ -68,15 +131,17 @@ export function normalizeOcrText(text: string): string {
   return compactCjkGaps(text.replace(/\s+/g, ' ').trim())
 }
 
+/** Force-stop OCR worker so in-flight recognize/createWorker can unblock. */
 export async function terminateOcrWorker() {
-  if (!workerPromise) return
+  const promise = workerPromise
+  workerPromise = null
+  workerGen += 1
+  if (!promise) return
   try {
-    const w = await workerPromise
+    const w = await promise
     await w.terminate()
   } catch {
-    /* */
-  } finally {
-    workerPromise = null
+    /* create may have failed or already aborted */
   }
 }
 

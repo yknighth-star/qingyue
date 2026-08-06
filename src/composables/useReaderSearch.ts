@@ -2,6 +2,7 @@ import { nextTick, ref, type Ref } from 'vue'
 import type { ReaderEngine } from '@/engines/types'
 import type { SearchHit } from '@/types'
 import { markQueryInSnippet } from '@/utils/domHighlight'
+import { terminateOcrWorker } from '@/utils/offlineOcr'
 
 export function useReaderSearch(opts: {
   engine: Ref<ReaderEngine | null>
@@ -71,7 +72,11 @@ export function useReaderSearch(opts: {
         }
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
+      if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+        if (useOcr && opts.engine.value?.capabilities.offlineOcr) {
+          offerOcr.value = true
+          searchFeedback.value = 'done'
+        }
         opts.flashStatus(useOcr ? '已取消 OCR' : '已取消搜索')
         return
       }
@@ -89,8 +94,19 @@ export function useReaderSearch(opts: {
     }
   }
 
+  /** Abort immediately: kill Tesseract worker and clear busy UI without waiting. */
   function cancelOcr() {
+    const wasOcr = ocrBusy.value
     searchAbort?.abort()
+    void terminateOcrWorker()
+    searchBusy.value = false
+    ocrBusy.value = false
+    ocrProgress.value = null
+    searchProgress.value = null
+    if (wasOcr && opts.engine.value?.capabilities.offlineOcr) {
+      offerOcr.value = true
+      searchFeedback.value = 'done'
+    }
   }
 
   function runOcrSearch() {
