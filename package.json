@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "postinstall": "node scripts/fetch-tessdata.mjs",
-    "tessdata": "node scripts/fetch-tessdata.mjs"
+    "tessdata": "node scripts/fetch-tessdata.mjs",
+    "push:proxy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/git-proxy.ps1 push",
+    "pull:proxy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/git-proxy.ps1 pull"
   },
   "dependencies": {
     "dexie": "^4.0.11",
