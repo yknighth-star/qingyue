@@ -1,0 +1,22 @@
+<script setup lang="ts">
+import { onMounted } from 'vue'
+import { useSettingsStore } from '@/stores/settings'
+import { useStatsStore } from '@/stores/stats'
+import { useBooksStore } from '@/stores/books'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+
+const settings = useSettingsStore()
+const stats = useStatsStore()
+const books = useBooksStore()
+
+onMounted(async () => {
+  await settings.load()
+  await stats.load()
+  await books.refresh()
+})
+</script>
+
+<template>
+  <router-view />
+  <ConfirmDialog />
+</template>

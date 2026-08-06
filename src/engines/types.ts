@@ -1,0 +1,45 @@
+import type { AnnotationRecord, Locator, ReaderSettings, SearchHit, TocItem } from '@/types'
+
+export interface ContentTapEvent {
+  clientX: number
+  clientY: number
+  /** true when user clicked an <a> inside content */
+  isLink: boolean
+  /** true when a non-empty text selection exists at tap time */
+  hasSelection?: boolean
+}
+
+export interface SelectionCaptureEvent {
+  text: string
+  locator: Locator
+  clientX: number
+  clientY: number
+  /** Selection geometry in viewport coordinates */
+  rect: { top: number; left: number; bottom: number; right: number }
+}
+
+export interface ReaderEngine {
+  open(blob: Blob, settings: ReaderSettings, container: HTMLElement): Promise<void>
+  destroy(): void
+  applySettings(settings: ReaderSettings): void
+  getToc(): TocItem[]
+  getProgress(): { locator: Locator; percent: number }
+  goTo(locator: Locator): Promise<void> | void
+  /** Jump roughly by reading progress 0–100 */
+  goToPercent?(percent: number): Promise<void> | void
+  next(): Promise<void> | void
+  prev(): Promise<void> | void
+  search?(query: string): Promise<SearchHit[]>
+  /** Temporarily highlight search matches in the current view; pass null/'' to clear. */
+  highlightSearch?(query: string | null): void
+  getSelectableText?(): string
+  onProgress?(cb: (p: { locator: Locator; percent: number }) => void): void
+  /** Wheel over content (including EPUB iframe). deltaY > 0 means scroll down. */
+  onWheel?(cb: (deltaY: number) => void): void
+  /** Click/tap inside content area (including EPUB iframe). */
+  onContentTap?(cb: (e: ContentTapEvent) => void): void
+  /** Text selection ready (including EPUB iframe mouseup). */
+  onSelection?(cb: (e: SelectionCaptureEvent | null) => void): void
+  applyAnnotations?(annots: AnnotationRecord[]): void
+  captureSelection?(): { text: string; locator: Locator; rect?: SelectionCaptureEvent['rect'] } | null
+}
