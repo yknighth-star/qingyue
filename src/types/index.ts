@@ -73,6 +73,8 @@ export interface ReaderSettings {
   theme: ThemeMode
   pageTurn: PageTurnMode
   brightness: number
+  /** PDF display zoom multiplier (1 = fit width) */
+  pdfZoom: number
   autoScrollSpeed: number
   dualColumn: boolean
   ttsRate: number
@@ -163,6 +165,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   theme: 'sepia',
   pageTurn: 'slide',
   brightness: 1,
+  pdfZoom: 1,
   autoScrollSpeed: 0,
   dualColumn: false,
   ttsRate: 1,

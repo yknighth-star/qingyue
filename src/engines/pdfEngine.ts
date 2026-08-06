@@ -22,10 +22,14 @@ export class PdfEngine implements ReaderEngine {
   private settings: ReaderSettings | null = null
   private progressCb: ((p: { locator: Locator; percent: number }) => void) | null = null
   private wheelCb: ((deltaY: number) => void) | null = null
-  private scale = 1.2
+  /** User zoom multiplier from settings (1 = fit container width) */
+  private userZoom = 1
   private rendering = false
   private toc: TocItem[] = []
   private scrollTimer: number | null = null
+  private resizeObserver: ResizeObserver | null = null
+  private resizeTimer: number | null = null
+  private lastRenderKey = ''
   private pageTurn: PageTurnMode = 'slide'
   private curling = false
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
@@ -38,6 +42,7 @@ export class PdfEngine implements ReaderEngine {
     this.container = container
     this.settings = settings
     this.pageTurn = settings.pageTurn
+    this.userZoom = clampPdfZoom(settings.pdfZoom ?? 1)
     container.innerHTML = ''
     container.className = 'pdf-reader'
     applyThemeVars(container, effectiveTheme(settings), settings)
@@ -57,8 +62,9 @@ export class PdfEngine implements ReaderEngine {
     pages.addEventListener('wheel', this.onWheelEvent, { passive: false })
     this.bindSelectionEvents(pages)
     suppressHostCaret(pages)
+    this.observeResize(pages)
 
-    await this.renderVisible()
+    await this.renderVisible(true)
     this.emitProgress()
   }
 
@@ -94,6 +100,9 @@ export class PdfEngine implements ReaderEngine {
 
   destroy() {
     if (this.selectionDebounce) window.clearTimeout(this.selectionDebounce)
+    if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
+    this.resizeObserver?.disconnect()
+    this.resizeObserver = null
     document.removeEventListener('selectionchange', this.onDocSelectionChange)
     if (this.pagesEl) {
       this.pagesEl.removeEventListener('scroll', this.onScroll)
@@ -105,17 +114,23 @@ export class PdfEngine implements ReaderEngine {
     if (this.container) this.container.innerHTML = ''
     this.container = null
     this.pagesEl = null
+    this.lastRenderKey = ''
   }
 
   applySettings(settings: ReaderSettings) {
+    const prevZoom = this.userZoom
     this.settings = settings
     this.pageTurn = settings.pageTurn
+    this.userZoom = clampPdfZoom(settings.pdfZoom ?? 1)
     if (this.container) {
       applyThemeVars(this.container, effectiveTheme(settings), settings)
     }
     if (this.pagesEl) {
       this.pagesEl.dataset.turn = settings.pageTurn
       this.pagesEl.style.scrollBehavior = settings.pageTurn === 'slide' ? 'auto' : 'smooth'
+    }
+    if (Math.abs(prevZoom - this.userZoom) > 0.001) {
+      void this.renderVisible(true)
     }
   }
 
@@ -306,26 +321,69 @@ export class PdfEngine implements ReaderEngine {
     }
   }
 
+  private observeResize(el: HTMLElement) {
+    this.resizeObserver?.disconnect()
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
+      this.resizeTimer = window.setTimeout(() => {
+        void this.renderVisible(true)
+      }, 180)
+    })
+    this.resizeObserver.observe(el)
+  }
+
+  /** Fit page to container width, then render at devicePixelRatio for sharpness. */
+  private getRenderMetrics(pageWidthAtScale1: number) {
+    const padding = 24
+    const containerWidth = Math.max(
+      200,
+      (this.pagesEl?.clientWidth || this.container?.clientWidth || 800) - padding,
+    )
+    const fitScale = (containerWidth / Math.max(1, pageWidthAtScale1)) * this.userZoom
+    const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3)
+    return { fitScale: Math.max(0.4, fitScale), dpr }
+  }
+
+  private renderKey(fitScale: number, dpr: number) {
+    return `${fitScale.toFixed(3)}_${dpr.toFixed(2)}_${this.userZoom}`
+  }
+
   private async renderVisible(force = false) {
     if (!this.pdf || !this.pagesEl || this.rendering) return
     this.rendering = true
     try {
+      const probe = await this.pdf.getPage(this.page)
+      const base = probe.getViewport({ scale: 1 })
+      const { fitScale, dpr } = this.getRenderMetrics(base.width)
+      const key = this.renderKey(fitScale, dpr)
+      if (force || key !== this.lastRenderKey) {
+        this.pagesEl.innerHTML = ''
+        this.lastRenderKey = key
+      }
+
       const total = this.pdf.numPages
       const start = Math.max(1, this.page - 1)
       const end = Math.min(total, this.page + 2)
-      if (force) this.pagesEl.innerHTML = ''
 
       for (let p = start; p <= end; p++) {
         if (this.pagesEl.querySelector(`[data-page="${p}"]`)) continue
         const page = await this.pdf.getPage(p)
-        const viewport = page.getViewport({ scale: this.scale })
+        const viewport = page.getViewport({ scale: fitScale })
         const wrap = document.createElement('div')
         wrap.className = 'pdf-page'
         wrap.dataset.page = String(p)
+
         const canvas = document.createElement('canvas')
         const ctx = canvas.getContext('2d')!
-        canvas.width = viewport.width
-        canvas.height = viewport.height
+        const outputScale = dpr
+        canvas.width = Math.floor(viewport.width * outputScale)
+        canvas.height = Math.floor(viewport.height * outputScale)
+        canvas.style.width = `${Math.floor(viewport.width)}px`
+        canvas.style.height = `${Math.floor(viewport.height)}px`
+        if (outputScale !== 1) {
+          ctx.setTransform(outputScale, 0, 0, outputScale, 0, 0)
+        }
+
         wrap.appendChild(canvas)
         const textLayer = document.createElement('div')
         textLayer.className = 'pdf-text-layer'
@@ -333,7 +391,7 @@ export class PdfEngine implements ReaderEngine {
         this.pagesEl.appendChild(wrap)
         await page.render({ canvasContext: ctx, viewport }).promise
       }
-      // sort pages
+
       const nodes = [...this.pagesEl.children] as HTMLElement[]
       nodes.sort((a, b) => Number(a.dataset.page) - Number(b.dataset.page))
       nodes.forEach((n) => this.pagesEl!.appendChild(n))
@@ -383,6 +441,10 @@ export class PdfEngine implements ReaderEngine {
   private emitProgress() {
     this.progressCb?.(this.getProgress())
   }
+}
+
+function clampPdfZoom(z: number) {
+  return Math.min(2.5, Math.max(0.6, z || 1))
 }
 
 type PdfOutlineNode = {

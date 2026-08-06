@@ -1109,6 +1109,18 @@ async function confirmDeleteBook() {
             @input="settingsStore.update({ brightness: Number(($event.target as HTMLInputElement).value) })"
           />
         </div>
+        <div v-if="book?.format === 'pdf'" class="field">
+          <label>PDF 清晰度 / 缩放 {{ Math.round((settings.pdfZoom ?? 1) * 100) }}%</label>
+          <input
+            type="range"
+            min="0.6"
+            max="2.5"
+            step="0.1"
+            :value="settings.pdfZoom ?? 1"
+            @input="settingsStore.update({ pdfZoom: Number(($event.target as HTMLInputElement).value) })"
+          />
+          <p class="seg-hint">按屏宽适配并按屏幕像素比渲染；调高可更清晰，更耗内存。</p>
+        </div>
         <div class="field">
           <label>自动滚屏速度 {{ settings.autoScrollSpeed }}（0 关闭）</label>
           <input

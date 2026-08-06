@@ -950,8 +950,6 @@ mark.search-hit {
 .pdf-page canvas {
   cursor: default;
   caret-color: transparent;
-  max-width: 100%;
-  height: auto;
 }
 
 .pdf-text-layer {
@@ -988,7 +986,9 @@ mark.search-hit {
 .pdf-page canvas {
   display: block;
   max-width: 100%;
+  width: auto;
   height: auto;
+  image-rendering: auto;
 }
 
 .pdf-bookmark-flag {
