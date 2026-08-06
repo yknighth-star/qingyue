@@ -48,6 +48,11 @@ export class PdfEngine implements ReaderEngine {
   /** Cached page plain text for search (built lazily / incrementally). */
   private textCache = new Map<number, string>()
   private textLayerGen = 0
+  /** Measured CSS heights per page — keep scroll stable when unloading canvases. */
+  private pageHeights = new Map<number, number>()
+  private defaultPageHeight = 900
+  /** A = no destructive evict; B = unload canvas but keep slots (default after fix). */
+  private virtualize = true
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -101,6 +106,7 @@ export class PdfEngine implements ReaderEngine {
     }
     this.selectionCb = null
     this.textCache.clear()
+    this.pageHeights.clear()
     this.pdf?.destroy()
     this.pdf = null
     if (this.container) this.container.innerHTML = ''
@@ -150,16 +156,24 @@ export class PdfEngine implements ReaderEngine {
   }
 
   async goTo(locator: Locator) {
-    if (locator.type !== 'pdf' || !this.pdf) return
-    this.page = Math.min(this.pdf.numPages, Math.max(1, locator.page))
-    await this.renderVisible(true)
-    if (this.pagesEl) {
-      const target = this.pagesEl.querySelector(`[data-page="${this.page}"]`) as HTMLElement | null
-      if (target) {
-        const top = target.offsetTop + target.offsetHeight * (locator.yRatio || 0)
-        this.pagesEl.scrollTop = top
-      }
+    if (locator.type !== 'pdf' || !this.pdf || !this.pagesEl) return
+    // Cancel pending scroll-driven render so it cannot fight this jump
+    if (this.scrollTimer) {
+      window.clearTimeout(this.scrollTimer)
+      this.scrollTimer = null
     }
+    await this.waitForRenderIdle()
+
+    const page = Math.min(this.pdf.numPages, Math.max(1, locator.page || 1))
+    this.page = page
+    // Do NOT force-rebuild slots — that is slow and was fighting scroll jumps
+    await this.renderVisible(false)
+    await yieldToMain()
+    this.scrollToPage(page, locator.yRatio || 0)
+    // Second pass after layout settles (slot heights may update once canvas paints)
+    await yieldToMain()
+    this.scrollToPage(page, locator.yRatio || 0)
+    this.emitProgress()
     if (this.searchHl.get()) this.highlightSearch(this.searchHl.get())
   }
 
@@ -196,7 +210,7 @@ export class PdfEngine implements ReaderEngine {
       }
       if (this.page < pdf.numPages) {
         this.page++
-        await this.renderVisible(true)
+        await this.renderVisible(false)
         this.scrollToPage(this.page)
         this.emitProgress()
       }
@@ -213,7 +227,7 @@ export class PdfEngine implements ReaderEngine {
       }
       if (this.page > 1) {
         this.page--
-        await this.renderVisible(true)
+        await this.renderVisible(false)
         this.scrollToPage(this.page)
         this.emitProgress()
       }
@@ -331,6 +345,36 @@ export class PdfEngine implements ReaderEngine {
     }
   }
 
+  private slotHeight(pageNum: number) {
+    return this.pageHeights.get(pageNum) || this.defaultPageHeight
+  }
+
+  /** Create/update one slot per page so document height stays stable while scrolling. */
+  private ensureSlots() {
+    if (!this.pdf || !this.pagesEl) return
+    const total = this.pdf.numPages
+    const existing = this.pagesEl.querySelectorAll('.pdf-page')
+    if (existing.length === total) {
+      for (const el of existing) {
+        const n = Number((el as HTMLElement).dataset.page)
+        if (!(el as HTMLElement).dataset.filled) {
+          ;(el as HTMLElement).style.minHeight = `${this.slotHeight(n)}px`
+        }
+      }
+      return
+    }
+    const frag = document.createDocumentFragment()
+    for (let i = 1; i <= total; i++) {
+      const slot = document.createElement('div')
+      slot.className = 'pdf-page pdf-slot'
+      slot.dataset.page = String(i)
+      slot.style.minHeight = `${this.slotHeight(i)}px`
+      frag.appendChild(slot)
+    }
+    this.pagesEl.innerHTML = ''
+    this.pagesEl.appendChild(frag)
+  }
+
   private async getPageText(pageNum: number): Promise<string> {
     const cached = this.textCache.get(pageNum)
     if (cached != null) return cached
@@ -344,27 +388,19 @@ export class PdfEngine implements ReaderEngine {
 
   private async renderPage(pageNum: number) {
     if (!this.pdf || !this.pagesEl) return
-    const existing = this.pagesEl.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
-    if (existing?.dataset.filled === '1') return
+    let wrap = this.pagesEl.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
+    if (!wrap) {
+      this.ensureSlots()
+      wrap = this.pagesEl.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
+    }
+    if (!wrap) return
+    if (wrap.dataset.filled === '1') return
 
     const page = await this.pdf.getPage(pageNum)
     const base = page.getViewport({ scale: 1 })
     const { fitScale, dpr } = this.getRenderMetrics(base.width)
-    const key = this.renderKey(fitScale, dpr)
-    if (key !== this.lastRenderKey) {
-      this.pagesEl.innerHTML = ''
-      this.lastRenderKey = key
-      this.textLayerGen += 1
-    }
-
     const viewport = page.getViewport({ scale: fitScale })
-    let wrap = this.pagesEl.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
-    if (!wrap) {
-      wrap = document.createElement('div')
-      wrap.className = 'pdf-page'
-      wrap.dataset.page = String(pageNum)
-      this.pagesEl.appendChild(wrap)
-    }
+
     wrap.innerHTML = ''
     wrap.dataset.filled = '1'
 
@@ -386,21 +422,17 @@ export class PdfEngine implements ReaderEngine {
 
     await page.render({ canvasContext: ctx, viewport }).promise
 
-    // Defer text layer so first paint stays snappy
+    const measured = Math.max(wrap.offsetHeight, Math.floor(viewport.height))
+    this.pageHeights.set(pageNum, measured)
+    if (pageNum === 1) this.defaultPageHeight = measured
+    wrap.style.minHeight = `${measured}px`
+    wrap.style.height = ''
+
     const gen = this.textLayerGen
     scheduleIdle(() => {
       if (gen !== this.textLayerGen || !wrap?.isConnected) return
       void this.fillTextLayer(page, viewport, textLayer, pageNum, gen)
     })
-
-    this.sortPageNodes()
-  }
-
-  private sortPageNodes() {
-    if (!this.pagesEl) return
-    const nodes = [...this.pagesEl.children] as HTMLElement[]
-    nodes.sort((a, b) => Number(a.dataset.page) - Number(b.dataset.page))
-    nodes.forEach((n) => this.pagesEl!.appendChild(n))
   }
 
   private async fillTextLayer(
@@ -415,6 +447,8 @@ export class PdfEngine implements ReaderEngine {
       if (gen !== this.textLayerGen || !layer.isConnected) return
       const parts: string[] = []
       layer.innerHTML = ''
+      const baseW = page.getViewport({ scale: 1 }).width
+      const scale = viewport.width / baseW
       for (const item of tc.items) {
         if (!('str' in item) || !item.str) continue
         parts.push(item.str)
@@ -423,7 +457,6 @@ export class PdfEngine implements ReaderEngine {
         const [x, y] = viewport.convertToViewportPoint(tx[4], tx[5])
         const span = document.createElement('span')
         span.textContent = item.str
-        const scale = viewport.width / page.getViewport({ scale: 1 }).width
         const fh = Math.max(6, Math.hypot(tx[2], tx[3]) * scale)
         span.style.left = `${x}px`
         span.style.top = `${y - fh}px`
@@ -438,30 +471,44 @@ export class PdfEngine implements ReaderEngine {
     }
   }
 
-  /** Drop canvases outside the live window to cap memory. */
+  /**
+   * B: unload canvas outside the live window but keep the slot + minHeight
+   * so scrollTop / document height do not jump.
+   */
   private evictOutside(start: number, end: number) {
-    if (!this.pagesEl) return
+    if (!this.virtualize || !this.pagesEl) return
     const nodes = [...this.pagesEl.querySelectorAll('.pdf-page')] as HTMLElement[]
     for (const el of nodes) {
       const n = Number(el.dataset.page)
-      if (n < start || n > end) {
-        el.remove()
-      }
+      if (n >= start && n <= end) continue
+      if (el.dataset.filled !== '1') continue
+      const h = el.offsetHeight || this.slotHeight(n)
+      this.pageHeights.set(n, h)
+      el.innerHTML = ''
+      el.dataset.filled = '0'
+      el.style.minHeight = `${h}px`
     }
   }
 
   private async renderVisible(force = false) {
     if (!this.pdf || !this.pagesEl || this.rendering) return
     this.rendering = true
+    const scroller = this.pagesEl
+    const prevTop = scroller.scrollTop
     try {
       const probe = await this.pdf.getPage(this.page)
       const base = probe.getViewport({ scale: 1 })
       const { fitScale, dpr } = this.getRenderMetrics(base.width)
       const key = this.renderKey(fitScale, dpr)
       if (force || key !== this.lastRenderKey) {
-        this.pagesEl.innerHTML = ''
         this.lastRenderKey = key
         this.textLayerGen += 1
+        this.pageHeights.clear()
+        // Estimate slot height from page-1 viewport before painting
+        this.defaultPageHeight = Math.max(200, Math.floor(base.height * fitScale))
+        this.ensureSlots()
+      } else {
+        this.ensureSlots()
       }
 
       const { start, end } = this.prefetchRange()
@@ -471,14 +518,40 @@ export class PdfEngine implements ReaderEngine {
         await this.renderPage(p)
       }
       this.evictOutside(start, end)
+
+      // Restore scroll after slot rebuild / height changes
+      if (force) scroller.scrollTop = prevTop
     } finally {
       this.rendering = false
     }
   }
 
-  private scrollToPage(page: number) {
-    const el = this.pagesEl?.querySelector(`[data-page="${page}"]`) as HTMLElement | null
-    el?.scrollIntoView({ block: 'start' })
+  private async waitForRenderIdle() {
+    let spins = 0
+    while (this.rendering && spins < 120) {
+      await yieldToMain()
+      spins++
+    }
+  }
+
+  /** Scroll so that pageNum is at the top of the scroller (optional yRatio within page). */
+  private scrollToPage(pageNum: number, yRatio = 0) {
+    const scroller = this.pagesEl
+    if (!scroller) return
+    const target = scroller.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
+    if (target) {
+      const sRect = scroller.getBoundingClientRect()
+      const tRect = target.getBoundingClientRect()
+      const delta = tRect.top - sRect.top + scroller.scrollTop
+      const h = Math.max(1, target.offsetHeight)
+      scroller.scrollTop = delta + h * Math.min(1, Math.max(0, yRatio))
+      return
+    }
+    // Fallback: sum estimated slot heights (+ flex gap)
+    const gap = 12
+    let top = scroller.clientTop || 0
+    for (let i = 1; i < pageNum; i++) top += this.slotHeight(i) + gap
+    scroller.scrollTop = top + this.slotHeight(pageNum) * Math.min(1, Math.max(0, yRatio))
   }
 
   private onScroll = () => {
@@ -583,8 +656,13 @@ async function resolveOutlinePage(
   if (!dest) return null
   try {
     const explicit = typeof dest === 'string' ? await pdf.getDestination(dest) : dest
-    if (!explicit || !Array.isArray(explicit) || !explicit[0]) return null
-    const index = await pdf.getPageIndex(explicit[0] as Parameters<PDFDocumentProxy['getPageIndex']>[0])
+    if (!explicit || !Array.isArray(explicit) || explicit[0] == null) return null
+    const first = explicit[0]
+    // Some outlines store a 0-based page index as a number
+    if (typeof first === 'number' && Number.isFinite(first)) {
+      return Math.min(pdf.numPages, Math.max(1, Math.floor(first) + 1))
+    }
+    const index = await pdf.getPageIndex(first as Parameters<PDFDocumentProxy['getPageIndex']>[0])
     return index + 1
   } catch {
     return null

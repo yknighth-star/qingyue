@@ -1,4 +1,4 @@
-import { nextTick, ref, type Ref } from 'vue'
+import { markRaw, nextTick, ref, shallowRef, type Ref } from 'vue'
 import { createEngine } from '@/engines/factory'
 import type { ReaderEngine } from '@/engines/types'
 import type { ContentTapEvent, SelectionCaptureEvent } from '@/engines/types'
@@ -19,7 +19,8 @@ export function useReaderSession(opts: {
   const stats = useStatsStore()
 
   const book = ref<BookRecord | null>(null)
-  const engine = ref<ReaderEngine | null>(null)
+  // Engines use TS private fields — must not be deep-proxied by Vue
+  const engine = shallowRef<ReaderEngine | null>(null)
   const percent = ref(0)
   const toc = ref<TocItem[]>([])
   const opening = ref(true)
@@ -83,7 +84,7 @@ export function useReaderSession(opts: {
       eng.onWheel?.(opts.onWheel)
       eng.onContentTap?.(opts.onContentTap)
       eng.onSelection?.(opts.onSelection)
-      engine.value = eng
+      engine.value = markRaw(eng)
       toc.value = eng.getToc()
       percent.value = eng.getProgress().percent
 
