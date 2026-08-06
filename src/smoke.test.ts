@@ -40,5 +40,15 @@ describe('engine capabilities', () => {
     expect(FULL_ENGINE_CAPABILITIES.textHighlights).toBe(true)
     expect(FULL_ENGINE_CAPABILITIES.annotations).toBe(true)
     expect(FULL_ENGINE_CAPABILITIES.percentJump).toBe(true)
+    expect(FULL_ENGINE_CAPABILITIES.offlineOcr).toBe(false)
+  })
+})
+
+describe('ocr helpers', () => {
+  it('detects sparse embedded text', async () => {
+    const { isSparseText } = await import('@/utils/offlineOcr')
+    expect(isSparseText('')).toBe(true)
+    expect(isSparseText('abc')).toBe(true)
+    expect(isSparseText('这是一段足够长的可用于判断是否需要OCR的正文内容示例文字')).toBe(false)
   })
 })

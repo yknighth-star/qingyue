@@ -27,6 +27,8 @@ export interface EngineCapabilities {
   textHighlights: boolean
   selection: boolean
   percentJump: boolean
+  /** Offline OCR for scanned PDFs (Tesseract). */
+  offlineOcr: boolean
 }
 
 export const FULL_ENGINE_CAPABILITIES: EngineCapabilities = {
@@ -35,6 +37,23 @@ export const FULL_ENGINE_CAPABILITIES: EngineCapabilities = {
   textHighlights: true,
   selection: true,
   percentJump: true,
+  offlineOcr: false,
+}
+
+export const PDF_ENGINE_CAPABILITIES: EngineCapabilities = {
+  ...FULL_ENGINE_CAPABILITIES,
+  offlineOcr: true,
+}
+
+export interface SearchOptions {
+  /** Run offline OCR on sparse/empty pages before matching. */
+  ocr?: boolean
+  onOcrProgress?: (p: { page: number; total: number }) => void
+  /** Called with cumulative hits so the UI can show results before the full scan finishes. */
+  onHits?: (hits: SearchHit[]) => void
+  /** Optional page progress for non-OCR scans. */
+  onSearchProgress?: (p: { page: number; total: number }) => void
+  signal?: AbortSignal
 }
 
 export interface ReaderEngine {
@@ -49,7 +68,9 @@ export interface ReaderEngine {
   goToPercent(percent: number): Promise<void> | void
   next(): Promise<void> | void
   prev(): Promise<void> | void
-  search(query: string): Promise<SearchHit[]>
+  search(query: string, opts?: SearchOptions): Promise<SearchHit[]>
+  /** True when embedded text looks too sparse (likely a scan). */
+  probeNeedsOcr?(): Promise<boolean>
   /** Temporarily highlight search matches in the current view; pass null/'' to clear. */
   highlightSearch(query: string | null): void
   getSelectableText(): string

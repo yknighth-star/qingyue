@@ -3,16 +3,18 @@ import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
 import { applyThemeVars, effectiveTheme } from '@/utils/format'
 import {
-  FULL_ENGINE_CAPABILITIES,
+  PDF_ENGINE_CAPABILITIES,
   type ContentTapEvent,
   type ReaderEngine,
+  type SearchOptions,
   type SelectionCaptureEvent,
 } from './types'
 import { createCurlGate, createHostSelectionBridge, createSearchHighlightState } from './shared'
 import { suppressHostCaret } from '@/utils/suppressCaret'
 import { selectionRectFromSel } from '@/utils/selectionToolbar'
 import { highlightAnnotInRoot } from '@/utils/domHighlight'
-import { indexOfIgnoreCase } from '@/utils/searchText'
+import { isSparseText, recognizeImage } from '@/utils/offlineOcr'
+import { compactCjkGaps, indexOfFlexible } from '@/utils/searchText'
 
 /**
  * Same-origin worker (copied to dist/public by vite plugin).
@@ -21,7 +23,7 @@ import { indexOfIgnoreCase } from '@/utils/searchText'
 pdfjs.GlobalWorkerOptions.workerSrc = `${import.meta.env.BASE_URL}pdf.worker.min.mjs`
 
 export class PdfEngine implements ReaderEngine {
-  readonly capabilities = FULL_ENGINE_CAPABILITIES
+  readonly capabilities = PDF_ENGINE_CAPABILITIES
   private pdf: PDFDocumentProxy | null = null
   private container: HTMLElement | null = null
   private pagesEl: HTMLElement | null = null
@@ -55,6 +57,11 @@ export class PdfEngine implements ReaderEngine {
   /** A = no destructive evict; B = unload canvas but keep slots (default after fix). */
   private virtualize = true
   private annots: AnnotationRecord[] = []
+  /** Pages whose textCache entry came from OCR. */
+  private ocrPages = new Set<number>()
+  private needsOcrCache: boolean | null = null
+  /** Soft cap so mobile OCR does not run forever on huge scans. */
+  private static readonly OCR_PAGE_CAP = 80
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -108,6 +115,8 @@ export class PdfEngine implements ReaderEngine {
     }
     this.selectionCb = null
     this.textCache.clear()
+    this.ocrPages.clear()
+    this.needsOcrCache = null
     this.pageHeights.clear()
     this.pdf?.destroy()
     this.pdf = null
@@ -237,27 +246,57 @@ export class PdfEngine implements ReaderEngine {
     await this.curl.run(this.pageTurn, this.container, 'prev', turn)
   }
 
-  async search(query: string): Promise<SearchHit[]> {
+  async search(query: string, opts?: SearchOptions): Promise<SearchHit[]> {
     if (!this.pdf || !query.trim()) return []
     const q = query.trim()
     const hits: SearchHit[] = []
     const total = this.pdf.numPages
+    const ocr = Boolean(opts?.ocr)
+    const ocrLimit = Math.min(total, PdfEngine.OCR_PAGE_CAP)
     // Batch with yields so the UI stays responsive on large PDFs
     for (let p = 1; p <= total && hits.length < 40; p++) {
-      const text = await this.getPageText(p)
+      if (opts?.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      const useOcr = ocr && p <= ocrLimit
+      if (useOcr) opts?.onOcrProgress?.({ page: p, total: ocrLimit })
+      else opts?.onSearchProgress?.({ page: p, total })
+      const text = await this.getPageText(p, useOcr, opts?.signal)
       let idx = 0
+      let pageAdded = false
       while (hits.length < 40) {
-        const found = indexOfIgnoreCase(text, q, idx)
+        const found = indexOfFlexible(text, q, idx)
         if (found < 0) break
         hits.push({
-          snippet: `…${text.slice(Math.max(0, found - 16), found + q.length + 16)}…`,
+          snippet: `…${text.slice(Math.max(0, found - 16), found + q.length + 24)}…`,
           locator: { type: 'pdf', page: p, yRatio: 0 },
         })
-        idx = found + Math.max(1, q.length)
+        pageAdded = true
+        idx = found + Math.max(1, q.replace(/\s+/g, '').length)
       }
-      if (p % 4 === 0) await yieldToMain()
+      // Stream hits as soon as this page contributes (or every few pages for progress)
+      if (pageAdded || p === 1 || p % 5 === 0 || p === total) {
+        opts?.onHits?.(hits.slice())
+      }
+      if (p % 2 === 0) await yieldToMain()
     }
+    opts?.onHits?.(hits.slice())
     return hits
+  }
+
+  async probeNeedsOcr(): Promise<boolean> {
+    if (this.needsOcrCache != null) return this.needsOcrCache
+    if (!this.pdf) return false
+    const sample = Math.min(3, this.pdf.numPages)
+    let chars = 0
+    let cjk = 0
+    for (let p = 1; p <= sample; p++) {
+      const t = await this.getEmbeddedText(p)
+      const compact = t.replace(/\s+/g, '')
+      chars += compact.length
+      cjk += (compact.match(/[\u3400-\u9FFF]/g) || []).join('').length
+    }
+    // Sparse, or lots of glyphs but almost no CJK (CID / garbage fonts) → OCR helps
+    this.needsOcrCache = chars < 40 || (chars >= 40 && cjk < Math.min(20, chars * 0.15))
+    return this.needsOcrCache
   }
 
   onProgress(cb: (p: { locator: Locator; percent: number }) => void) {
@@ -398,15 +437,79 @@ export class PdfEngine implements ReaderEngine {
     this.pagesEl.appendChild(frag)
   }
 
-  private async getPageText(pageNum: number): Promise<string> {
-    const cached = this.textCache.get(pageNum)
-    if (cached != null) return cached
+  private async getEmbeddedText(pageNum: number): Promise<string> {
     if (!this.pdf) return ''
     const page = await this.pdf.getPage(pageNum)
     const tc = await page.getTextContent()
-    const text = tc.items.map((it) => ('str' in it ? it.str : '')).join('')
-    this.textCache.set(pageNum, text)
-    return text
+    // Join items without extra spaces — PDF.js already spaces glyphs for CJK often
+    const raw = tc.items.map((it) => ('str' in it ? it.str : '')).join('')
+    return compactCjkGaps(raw)
+  }
+
+  private async getPageText(pageNum: number, allowOcr = false, signal?: AbortSignal): Promise<string> {
+    const cached = this.textCache.get(pageNum)
+    if (cached != null && (!allowOcr || this.ocrPages.has(pageNum) || !isSparseText(cached))) {
+      return cached
+    }
+    if (!this.pdf) return ''
+    const embedded = cached ?? (await this.getEmbeddedText(pageNum))
+    if (!allowOcr || !isSparseText(embedded)) {
+      this.textCache.set(pageNum, embedded)
+      return embedded
+    }
+    try {
+      const ocrText = await this.ocrPage(pageNum, signal)
+      const text = ocrText || embedded
+      this.textCache.set(pageNum, text)
+      this.ocrPages.add(pageNum)
+      return text
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err
+      console.warn('OCR page failed', pageNum, err)
+      this.textCache.set(pageNum, embedded)
+      return embedded
+    }
+  }
+
+  private async ocrPage(pageNum: number, signal?: AbortSignal): Promise<string> {
+    if (!this.pdf) return ''
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    const page = await this.pdf.getPage(pageNum)
+    const base = page.getViewport({ scale: 1 })
+    // Target ~1800px width so Tesseract gets usable line height (avoids 1×N scale errors)
+    const scale = Math.min(3, Math.max(1.8, 1800 / Math.max(1, base.width)))
+    const viewport = page.getViewport({ scale })
+    const w = Math.max(1, Math.floor(viewport.width))
+    const h = Math.max(1, Math.floor(viewport.height))
+    if (w < 64 || h < 64) return ''
+
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true })
+    if (!ctx) return ''
+    canvas.width = w
+    canvas.height = h
+    // Opaque white — scanned PDFs often render transparent → black/garbage for OCR
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, w, h)
+
+    await page.render({
+      canvasContext: ctx,
+      viewport,
+      background: 'rgb(255,255,255)',
+      intent: 'print',
+    }).promise
+
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+
+    // Prefer PNG blob — more reliable than transferring a live canvas into the worker
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((b) => resolve(b), 'image/png')
+    })
+    // Release pixel buffer early on long OCR runs
+    canvas.width = 0
+    canvas.height = 0
+    if (!blob || blob.size < 200) return ''
+    return recognizeImage(blob, signal)
   }
 
   private async renderPage(pageNum: number) {
@@ -486,7 +589,9 @@ export class PdfEngine implements ReaderEngine {
         span.style.fontSize = `${fh}px`
         layer.appendChild(span)
       }
-      this.textCache.set(pageNum, parts.join(''))
+      if (!this.ocrPages.has(pageNum)) {
+        this.textCache.set(pageNum, parts.join(''))
+      }
       const q = this.searchHl.get()
       if (q) this.searchHl.applyRoot(layer, false)
       // Re-paint highlights after text layer is ready (virtualized pages)

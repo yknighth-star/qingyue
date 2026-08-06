@@ -1,32 +1,88 @@
 import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { VitePWA } from 'vite-plugin-pwa'
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { copyFileSync, createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import path from 'node:path'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 
 // GitHub Pages project site: https://yknighth-star.github.io/qingyue/
 const base = process.env.GITHUB_PAGES === 'true' ? '/qingyue/' : '/'
 
-/** Copy PDF.js worker + .nojekyll after all other plugins write dist. */
-function pdfWorkerAndPagesPlugin(): Plugin {
-  const workerSrc = path.resolve('node_modules/pdfjs-dist/build/pdf.worker.min.mjs')
+function copyFile(src: string, dest: string) {
+  if (!existsSync(src)) return false
+  mkdirSync(path.dirname(dest), { recursive: true })
+  copyFileSync(src, dest)
+  return true
+}
 
-  const copyWorker = (destDir: string) => {
-    if (!existsSync(workerSrc)) return
-    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
-    copyFileSync(workerSrc, path.join(destDir, 'pdf.worker.min.mjs'))
+const OCR_FILES: Record<string, { src: string; type: string }> = {
+  'worker.min.js': {
+    src: path.resolve('node_modules/tesseract.js/dist/worker.min.js'),
+    type: 'text/javascript; charset=utf-8',
+  },
+  'tesseract-core-simd-lstm.js': {
+    src: path.resolve('node_modules/tesseract.js-core/tesseract-core-simd-lstm.js'),
+    type: 'text/javascript; charset=utf-8',
+  },
+  'tesseract-core-simd-lstm.wasm': {
+    src: path.resolve('node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm'),
+    type: 'application/wasm',
+  },
+}
+
+function sendFile(res: ServerResponse, filePath: string, contentType: string) {
+  const st = statSync(filePath)
+  res.statusCode = 200
+  res.setHeader('Content-Type', contentType)
+  res.setHeader('Content-Length', String(st.size))
+  res.setHeader('Cache-Control', 'no-cache')
+  createReadStream(filePath).pipe(res)
+}
+
+/** Serve / copy PDF.js worker + offline Tesseract runtime (dev middleware + dist). */
+function staticAssetsPlugin(): Plugin {
+  const pdfWorkerSrc = path.resolve('node_modules/pdfjs-dist/build/pdf.worker.min.mjs')
+
+  const copyOcrRuntime = (destRoot: string) => {
+    for (const [name, meta] of Object.entries(OCR_FILES)) {
+      copyFile(meta.src, path.join(destRoot, 'ocr-runtime', name))
+    }
+  }
+
+  const copyAll = (destRoot: string) => {
+    copyFile(pdfWorkerSrc, path.join(destRoot, 'pdf.worker.min.mjs'))
+    copyOcrRuntime(destRoot)
   }
 
   return {
-    name: 'pdf-worker-and-pages',
-    enforce: 'post',
+    name: 'qingyue-static-assets',
+    enforce: 'pre',
+    configureServer(server) {
+      // Always serve OCR runtime from node_modules — publicDir watch can miss
+      // gitignored / late-created folders and fall through to index.html.
+      server.middlewares.use((req: IncomingMessage, res: ServerResponse, next) => {
+        const raw = req.url?.split('?')[0] || ''
+        const pathname = decodeURIComponent(raw)
+        const marker = '/ocr-runtime/'
+        const idx = pathname.lastIndexOf(marker)
+        if (idx < 0) return next()
+        const name = pathname.slice(idx + marker.length)
+        const meta = OCR_FILES[name]
+        if (!meta || !existsSync(meta.src)) return next()
+        sendFile(res, meta.src, meta.type)
+      })
+    },
     buildStart() {
-      copyWorker(path.resolve('public'))
+      copyAll(path.resolve('public'))
     },
     closeBundle() {
       const outDir = path.resolve('dist')
-      copyWorker(outDir)
+      copyAll(outDir)
+      for (const lang of ['eng', 'chi_sim']) {
+        const src = path.resolve('public/tessdata', `${lang}.traineddata`)
+        copyFile(src, path.join(outDir, 'tessdata', `${lang}.traineddata`))
+      }
       writeFileSync(path.join(outDir, '.nojekyll'), '')
     },
   }
@@ -36,10 +92,18 @@ export default defineConfig({
   base,
   plugins: [
     vue(),
-    pdfWorkerAndPagesPlugin(),
+    staticAssetsPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg', 'pdf.worker.min.mjs'],
+      includeAssets: [
+        'favicon.svg',
+        'pdf.worker.min.mjs',
+        'ocr-runtime/worker.min.js',
+        'ocr-runtime/tesseract-core-simd-lstm.js',
+        'ocr-runtime/tesseract-core-simd-lstm.wasm',
+        'tessdata/eng.traineddata',
+        'tessdata/chi_sim.traineddata',
+      ],
       manifest: {
         name: '轻阅',
         short_name: '轻阅',
@@ -59,12 +123,21 @@ export default defineConfig({
         ],
       },
       workbox: {
-        cacheId: 'qingyue-v2',
+        cacheId: 'qingyue-v3',
         cleanupOutdatedCaches: true,
-        globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}'],
-        maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        globPatterns: [
+          '**/*.{js,mjs,css,html,ico,png,svg,woff2,wasm,traineddata}',
+        ],
+        maximumFileSizeToCacheInBytes: 12 * 1024 * 1024,
         navigateFallback: 'index.html',
-        navigateFallbackDenylist: [/^\/_/, /\/assets\//, /\.mjs$/i, /pdf\.worker/i],
+        navigateFallbackDenylist: [
+          /^\/_/,
+          /\/assets\//,
+          /\.mjs$/i,
+          /pdf\.worker/i,
+          /traineddata$/i,
+          /ocr-runtime\//i,
+        ],
       },
     }),
   ],
@@ -74,7 +147,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    include: ['epubjs', 'pdfjs-dist'],
+    include: ['epubjs', 'pdfjs-dist', 'tesseract.js'],
     exclude: ['pdfjs-dist/build/pdf.worker.min.mjs'],
   },
   worker: {

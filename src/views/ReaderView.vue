@@ -122,7 +122,13 @@ const {
   searchHits,
   searchBusy,
   searchFeedback,
+  offerOcr,
+  ocrBusy,
+  ocrProgress,
+  searchProgress,
   runSearch,
+  runOcrSearch,
+  cancelOcr,
   clearSearch,
   goHit,
   snippetHtml,
@@ -470,10 +476,17 @@ onBeforeUnmount(() => {
       :hits="searchHits"
       :busy="searchBusy"
       :feedback="searchFeedback"
+      :offer-ocr="offerOcr"
+      :ocr-busy="ocrBusy"
+      :ocr-progress="ocrProgress"
+      :search-progress="searchProgress"
+      :can-ocr="engine?.capabilities.offlineOcr === true"
       :snippet-html="snippetHtml"
       @close="closePanel"
       @update:query="onSearchQuery"
       @search="runSearch"
+      @ocr-search="runOcrSearch"
+      @cancel-ocr="cancelOcr"
       @clear="clearSearch"
       @select="goHit"
     />
