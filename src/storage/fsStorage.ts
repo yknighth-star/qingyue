@@ -121,6 +121,7 @@ export async function scanLibraryFolder(): Promise<ImportResult[]> {
       progressPercent: 0,
       tags: tagsWithAutoFolder([], path),
       contentHash,
+      updatedAt: Date.now(),
     }
     await db.books.put(book)
     existing.push(book)

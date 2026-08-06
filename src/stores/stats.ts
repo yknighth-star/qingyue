@@ -1,34 +1,25 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { db } from '@/db'
+import { statsRepo } from '@/repos'
 import type { StatsRecord } from '@/types'
 
 function today() {
   return new Date().toISOString().slice(0, 10)
 }
 
-const emptyStats = (): StatsRecord => ({
-  id: 'global',
-  totalMinutes: 0,
-  streakDays: 0,
-  byDay: [],
-  byBook: [],
-})
-
 export const useStatsStore = defineStore('stats', () => {
-  const stats = ref<StatsRecord>(emptyStats())
+  const stats = ref<StatsRecord>(statsRepo.empty())
   let sessionStart = 0
   let sessionBookId: string | null = null
 
   async function load() {
-    const row = await db.stats.get('global')
-    stats.value = row || emptyStats()
+    stats.value = await statsRepo.load()
   }
 
   async function reset() {
-    const s = emptyStats()
+    const s = statsRepo.empty()
     stats.value = s
-    await db.stats.put(s)
+    await statsRepo.save(s)
   }
 
   function startSession(bookId: string) {
@@ -66,7 +57,7 @@ export const useStatsStore = defineStore('stats', () => {
     }
     s.lastActiveDate = d
     stats.value = s
-    await db.stats.put(s)
+    await statsRepo.save(s)
   }
 
   return { stats, load, reset, startSession, endSession }

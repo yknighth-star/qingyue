@@ -19,11 +19,17 @@ export interface BookRecord {
   storage: StorageKind
   fsPath?: string
   addedAt: number
+  /** Local mutation time — reserved for future sync conflict resolution */
+  updatedAt?: number
   lastReadAt?: number
   isFavorite: boolean
   progressPercent: number
   tags: string[]
   contentHash?: string
+  /** Soft-delete marker — reserved for future sync; unused today */
+  deletedAt?: number
+  /** Remote id once cloud sync exists */
+  remoteId?: string
 }
 
 export interface BookFileRecord {
@@ -60,6 +66,9 @@ export interface AnnotationRecord {
   note?: string
   locator: Locator
   createdAt: number
+  updatedAt?: number
+  deletedAt?: number
+  remoteId?: string
 }
 
 export interface ReaderSettings {

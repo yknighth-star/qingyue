@@ -49,6 +49,7 @@ export const idbStorage: LibraryStorage = {
         progressPercent: 0,
         tags: [],
         contentHash,
+        updatedAt: Date.now(),
       }
       await db.transaction('rw', db.books, db.bookFiles, async () => {
         await db.books.put(book)

@@ -1244,6 +1244,40 @@ mark.search-hit {
   gap: 0.4rem;
 }
 
+/* PDF 画质：两列等宽，间距更大，避免「流畅/高清」挤在一起 */
+.quality-seg {
+  grid-template-columns: 1fr 1fr;
+  gap: 0.85rem;
+}
+
+.quality-seg-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-height: 3.6rem;
+  padding: 0.75rem 0.65rem;
+  border-radius: 10px;
+}
+
+.quality-seg-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.quality-seg-desc {
+  font-size: 0.72rem;
+  font-weight: 500;
+  opacity: 0.72;
+  line-height: 1.2;
+}
+
+.quality-seg-btn.active .quality-seg-desc {
+  opacity: 0.9;
+}
+
 .seg-btn {
   padding: 0.5rem 0.4rem;
   border-radius: 8px;

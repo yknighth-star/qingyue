@@ -1,15 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { db } from '@/db'
-import { idbStorage } from '@/storage/idbStorage'
-import {
-  deleteBookAny,
-  getBookBlobAny,
-  getLinkedRoot,
-  linkLibraryFolder,
-  scanLibraryFolder,
-  supportsFsAccess,
-} from '@/storage/fsStorage'
+import { getPlatform } from '@/platform'
+import { annotationsRepo, booksRepo, progressRepo } from '@/repos'
 import type {
   AnnotationRecord,
   BookRecord,
@@ -21,6 +13,7 @@ import type {
 } from '@/types'
 
 export const useBooksStore = defineStore('books', () => {
+  const platform = getPlatform()
   const books = ref<BookRecord[]>([])
   const filter = ref<ShelfFilter>('all')
   const tagFilter = ref<string | null>(null)
@@ -30,7 +23,7 @@ export const useBooksStore = defineStore('books', () => {
   const sortBy = ref<ShelfSort>('activity')
   const loading = ref(false)
   const fsLinkedName = ref<string | null>(null)
-  const fsSupported = supportsFsAccess()
+  const fsSupported = platform.env.canLinkFolder
   const quotaWarning = ref<string | null>(null)
 
   const allTags = computed(() => {
@@ -89,8 +82,8 @@ export const useBooksStore = defineStore('books', () => {
   async function refresh() {
     loading.value = true
     try {
-      books.value = await db.books.toArray()
-      const root = await getLinkedRoot()
+      books.value = await booksRepo.list()
+      const root = await platform.files.getLinkedRoot()
       fsLinkedName.value = root?.name ?? null
       await checkQuota()
     } finally {
@@ -100,14 +93,18 @@ export const useBooksStore = defineStore('books', () => {
 
   async function checkQuota() {
     try {
-      if (navigator.storage?.estimate) {
-        const { usage = 0, quota = 1 } = await navigator.storage.estimate()
-        const ratio = usage / quota
-        if (ratio > 0.8) {
-          quotaWarning.value = `本地存储已使用约 ${Math.round(ratio * 100)}%。大文件请改用「关联文件夹」。`
-        } else {
-          quotaWarning.value = null
-        }
+      const est = await platform.files.estimateQuota()
+      if (!est) {
+        quotaWarning.value = null
+        return
+      }
+      const ratio = est.usage / est.quota
+      if (ratio > 0.8) {
+        quotaWarning.value = platform.env.canLinkFolder
+          ? `本地存储已使用约 ${Math.round(ratio * 100)}%。大文件请改用「关联文件夹」。`
+          : `本地存储已使用约 ${Math.round(ratio * 100)}%。`
+      } else {
+        quotaWarning.value = null
       }
     } catch {
       quotaWarning.value = null
@@ -115,22 +112,22 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   async function importFiles(files: File[]) {
-    const results = await idbStorage.importFiles(files)
+    const results = await platform.files.importFiles(files)
     await refresh()
     return results
   }
 
   async function linkFolder() {
-    const info = await linkLibraryFolder()
+    const info = await platform.files.linkFolder()
     if (!info) return null
     fsLinkedName.value = info.name
-    const scanned = await scanLibraryFolder()
+    const scanned = await platform.files.scanLinkedFolder()
     await refresh()
     return scanned
   }
 
   async function rescanFolder() {
-    const scanned = await scanLibraryFolder()
+    const scanned = await platform.files.scanLinkedFolder()
     await refresh()
     return scanned
   }
@@ -138,17 +135,17 @@ export const useBooksStore = defineStore('books', () => {
   async function toggleFavorite(id: string) {
     const book = books.value.find((b) => b.id === id)
     if (!book) return
-    await db.books.update(id, { isFavorite: !book.isFavorite })
+    await booksRepo.update(id, { isFavorite: !book.isFavorite })
     await refresh()
   }
 
   async function updateMeta(id: string, patch: Partial<Pick<BookRecord, 'title' | 'author' | 'tags'>>) {
-    await db.books.update(id, patch)
+    await booksRepo.update(id, patch)
     await refresh()
   }
 
   async function remove(id: string) {
-    await deleteBookAny(id)
+    await booksRepo.delete(id)
     await refresh()
   }
 
@@ -158,7 +155,7 @@ export const useBooksStore = defineStore('books', () => {
    * Keeps the copy with higher progress / favorite / more recent read.
    */
   async function removeDuplicates(): Promise<{ removed: number; groups: number }> {
-    const list = await db.books.toArray()
+    const list = await booksRepo.list()
     const groups = new Map<string, BookRecord[]>()
 
     const keyOf = (b: BookRecord) => {
@@ -190,26 +187,29 @@ export const useBooksStore = defineStore('books', () => {
       const keeper = sorted[0]
       const drop = sorted.slice(1)
 
-      let keeperHasAnnots = (await db.annotations.where('bookId').equals(keeper.id).count()) > 0
+      let keeperHasAnnots = (await annotationsRepo.countByBook(keeper.id)) > 0
       for (const d of drop) {
         if (!keeperHasAnnots) {
-          const annots = await db.annotations.where('bookId').equals(d.id).toArray()
+          const annots = await annotationsRepo.listByBookRaw(d.id)
           for (const a of annots) {
-            await db.annotations.put({ ...a, id: `${a.id}_m_${keeper.id.slice(-4)}`, bookId: keeper.id })
+            await annotationsRepo.put({
+              ...a,
+              id: `${a.id}_m_${keeper.id.slice(-4)}`,
+              bookId: keeper.id,
+            })
           }
           if (annots.length) keeperHasAnnots = true
         }
-        // Prefer richer progress on keeper
-        const dProg = await db.progress.get(d.id)
-        const kProg = await db.progress.get(keeper.id)
+        const dProg = await progressRepo.get(d.id)
+        const kProg = await progressRepo.get(keeper.id)
         if (dProg && (!kProg || dProg.percent > (kProg.percent || 0))) {
-          await db.progress.put({ ...dProg, bookId: keeper.id })
-          await db.books.update(keeper.id, {
+          await progressRepo.put({ ...dProg, bookId: keeper.id })
+          await booksRepo.update(keeper.id, {
             progressPercent: dProg.percent,
             lastReadAt: Math.max(keeper.lastReadAt || 0, d.lastReadAt || 0) || dProg.updatedAt,
           })
         }
-        await deleteBookAny(d.id)
+        await booksRepo.delete(d.id)
         removed++
       }
     }
@@ -220,10 +220,9 @@ export const useBooksStore = defineStore('books', () => {
 
   /** Wipe all books, blobs, progress and notes. Keeps settings / folder link. */
   async function clearLibrary(): Promise<{ removed: number }> {
-    const ids = (await db.books.toArray()).map((b) => b.id)
+    const ids = (await booksRepo.list()).map((b) => b.id)
     const count = ids.length
 
-    // Clear UI immediately so the shelf empties even if IDB is slow
     books.value = []
     tagFilter.value = null
     searchQuery.value = ''
@@ -232,20 +231,15 @@ export const useBooksStore = defineStore('books', () => {
 
     for (const id of ids) {
       try {
-        await deleteBookAny(id)
+        await booksRepo.delete(id)
       } catch {
-        // continue; bulk clear below is the fallback
+        /* continue */
       }
     }
 
-    // Belt-and-suspenders: wipe tables even if per-book delete missed blobs
-    await db.books.clear()
-    await db.bookFiles.clear()
-    await db.progress.clear()
-    await db.annotations.clear()
-
+    await booksRepo.clearMetaTables()
     await refresh()
-    const left = await db.books.count()
+    const left = await booksRepo.count()
     if (left > 0) {
       throw new Error(`清空未完成，仍有 ${left} 本残留，请刷新页面后重试`)
     }
@@ -253,33 +247,33 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   async function getBlob(id: string) {
-    return getBookBlobAny(id)
+    return booksRepo.getBlob(id)
   }
 
   async function saveProgress(bookId: string, locator: ProgressRecord['locator'], percent: number) {
-    await db.progress.put({ bookId, locator, percent, updatedAt: Date.now() })
-    await db.books.update(bookId, { progressPercent: percent, lastReadAt: Date.now() })
+    const { updatedAt } = await progressRepo.save(bookId, locator, percent)
     const b = books.value.find((x) => x.id === bookId)
     if (b) {
       b.progressPercent = percent
-      b.lastReadAt = Date.now()
+      b.lastReadAt = updatedAt
+      b.updatedAt = updatedAt
     }
   }
 
   async function getProgress(bookId: string) {
-    return db.progress.get(bookId)
+    return progressRepo.get(bookId)
   }
 
   async function listAnnotations(bookId: string) {
-    return db.annotations.where('bookId').equals(bookId).reverse().sortBy('createdAt')
+    return annotationsRepo.listByBook(bookId)
   }
 
   async function addAnnotation(annot: AnnotationRecord) {
-    await db.annotations.put(annot)
+    await annotationsRepo.add(annot)
   }
 
   async function removeAnnotation(id: string) {
-    await db.annotations.delete(id)
+    await annotationsRepo.remove(id)
   }
 
   return {

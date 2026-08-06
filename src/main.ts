@@ -1,9 +1,13 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { registerSW } from 'virtual:pwa-register'
+import { initPlatform } from '@/platform'
 import App from './App.vue'
 import router from './router'
 import './styles/main.css'
+
+// Web today; pass createDesktopPlatform() / createMobilePlatform() from shells later.
+initPlatform()
 
 // Force SW update so stale GitHub Pages caches (old hashed pdf.worker) are dropped
 registerSW({
