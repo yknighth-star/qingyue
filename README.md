@@ -2,7 +2,7 @@
 
 本地文档与电子书阅读 PWA（Vite + Vue 3 + TypeScript）。支持 EPUB / TXT / PDF，数据存 IndexedDB，桌面端可关联文件夹（如 `E:\Projects\Books`）。
 
-> npm 包名：`qingyue`。GitHub 仓库 / Pages 路径仍为 `h5-ebook-reader`（改仓库名会影响线上地址）。
+> npm 包名 / 本地目录：`qingyue`（`E:\Projects\qingyue`）。GitHub 仓库 / Pages 路径仍为 `h5-ebook-reader`（改仓库名会影响线上地址）。
 
 ## Setup
 
