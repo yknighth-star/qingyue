@@ -1,6 +1,8 @@
-# H5 Local Ebook Reader
+# 轻阅（qingyue）
 
-Vite + Vue 3 + TypeScript PWA ebook reader. Supports EPUB / TXT / PDF with local IndexedDB storage and optional desktop folder library (`E:\Projects\Books`).
+本地文档与电子书阅读 PWA（Vite + Vue 3 + TypeScript）。支持 EPUB / TXT / PDF，数据存 IndexedDB，桌面端可关联文件夹（如 `E:\Projects\Books`）。
+
+> npm 包名：`qingyue`。GitHub 仓库 / Pages 路径仍为 `h5-ebook-reader`（改仓库名会影响线上地址）。
 
 ## Setup
 
@@ -38,4 +40,4 @@ Workflow: https://github.com/yknighth-star/h5-ebook-reader/actions
 
 ## Library folder
 
-Place books in the sibling folder: `E:\Projects\Books` (same level as this project). On desktop Chrome/Edge, use “关联书库文件夹” to grant access.
+Place files in the sibling folder: `E:\Projects\Books` (same level as this project). On desktop Chrome/Edge, use “关联文件夹” to grant access.

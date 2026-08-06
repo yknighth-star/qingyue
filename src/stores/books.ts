@@ -104,7 +104,7 @@ export const useBooksStore = defineStore('books', () => {
         const { usage = 0, quota = 1 } = await navigator.storage.estimate()
         const ratio = usage / quota
         if (ratio > 0.8) {
-          quotaWarning.value = `本地存储已使用约 ${Math.round(ratio * 100)}%。大文件请改用「关联书库文件夹」。`
+          quotaWarning.value = `本地存储已使用约 ${Math.round(ratio * 100)}%。大文件请改用「关联文件夹」。`
         } else {
           quotaWarning.value = null
         }

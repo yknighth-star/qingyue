@@ -41,9 +41,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg', 'pdf.worker.min.mjs'],
       manifest: {
-        name: '本地电子书阅读器',
-        short_name: '书库',
-        description: '本地 EPUB / TXT / PDF 阅读器',
+        name: '轻阅',
+        short_name: '轻阅',
+        description: '本地阅读文档与电子书（EPUB / TXT / PDF）',
         theme_color: '#1a1f2e',
         background_color: '#1a1f2e',
         display: 'standalone',
@@ -59,7 +59,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        cacheId: 'h5-ebook-reader-v3',
+        cacheId: 'qingyue-v1',
         cleanupOutdatedCaches: true,
         globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,

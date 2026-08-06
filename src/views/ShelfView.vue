@@ -35,7 +35,7 @@ const progressOptions: { id: ProgressFilter; label: string }[] = [
 const sortOptions: { id: ShelfSort; label: string }[] = [
   { id: 'activity', label: '最近阅读' },
   { id: 'added', label: '最近添加' },
-  { id: 'title', label: '书名' },
+  { id: 'title', label: '标题' },
   { id: 'author', label: '作者' },
 ]
 
@@ -79,7 +79,7 @@ async function onPickFiles(e: Event) {
     const results = await books.importFiles(files)
     const dup = results.filter((r) => r.duplicated).length
     const ok = results.length - dup
-    message.value = `导入 ${ok} 本` + (dup ? `，跳过重复 ${dup} 本` : '')
+    message.value = `导入 ${ok} 个` + (dup ? `，跳过重复 ${dup} 个` : '')
   } catch (err) {
     message.value = err instanceof Error ? err.message : '导入失败'
   }
@@ -97,7 +97,7 @@ async function onLinkFolder() {
       return
     }
     const ok = scanned.filter((s) => !s.duplicated).length
-    message.value = `已关联「${books.fsLinkedName}」，新增 ${ok} 本`
+    message.value = `已关联「${books.fsLinkedName}」，新增 ${ok} 个`
   } catch (err) {
     message.value = err instanceof Error ? err.message : '关联失败'
   }
@@ -105,17 +105,17 @@ async function onLinkFolder() {
 
 async function onRescan() {
   const scanned = await books.rescanFolder()
-  message.value = `扫描完成，新增 ${scanned.filter((s) => !s.duplicated).length} 本`
+  message.value = `扫描完成，新增 ${scanned.filter((s) => !s.duplicated).length} 个`
 }
 
 async function onDedup() {
   if (books.books.length < 2) {
-    message.value = '书库中书籍不足，无需去重'
+    message.value = '文库中文件不足，无需去重'
     return
   }
   const ok = await confirmDialog({
     title: '清理重复',
-    message: '将按文件内容清理重复书籍，保留阅读进度更高的一本。确定继续？',
+    message: '将按文件内容清理重复项，保留阅读进度更高的一份。确定继续？',
     confirmText: '清理',
     danger: true,
   })
@@ -123,7 +123,7 @@ async function onDedup() {
   try {
     const { removed, groups } = await books.removeDuplicates()
     message.value =
-      removed > 0 ? `已清理 ${removed} 本重复书（${groups} 组）` : '未发现重复书籍'
+      removed > 0 ? `已清理 ${removed} 个重复文件（${groups} 组）` : '未发现重复文件'
   } catch (err) {
     message.value = err instanceof Error ? err.message : '去重失败'
   }
@@ -132,12 +132,12 @@ async function onDedup() {
 async function onClearLibrary() {
   const n = books.books.length
   if (!n) {
-    message.value = '书库已经是空的'
+    message.value = '文库已经是空的'
     return
   }
   const ok = await confirmDialog({
-    title: '清空书库',
-    message: `确定清空全部 ${n} 本书？\n将删除本地缓存、阅读进度、笔记与阅读统计（不可恢复）。\n关联文件夹里的源文件不会被删除。`,
+    title: '清空文库',
+    message: `确定清空全部 ${n} 个文件？\n将删除本地缓存、阅读进度、笔记与阅读统计（不可恢复）。\n关联文件夹里的源文件不会被删除。`,
     confirmText: '清空全部',
     danger: true,
   })
@@ -146,7 +146,7 @@ async function onClearLibrary() {
     const { removed } = await books.clearLibrary()
     await stats.reset()
     editing.value = null
-    message.value = `已清空书库（${removed} 本）`
+    message.value = `已清空文库（${removed} 个）`
   } catch (err) {
     message.value = err instanceof Error ? err.message : '清空失败'
   }
@@ -168,7 +168,7 @@ function coverLabel(title: string) {
 
 async function confirmRemove(b: BookRecord) {
   const ok = await confirmDialog({
-    title: '删除书籍',
+    title: '删除文件',
     message: `确定删除「${b.title}」？\n阅读进度与笔记也会一并删除。`,
     confirmText: '删除',
     danger: true,
@@ -220,7 +220,7 @@ async function onDrop(e: DragEvent) {
     @drop="onDrop"
   >
     <header class="topbar" @mousedown="clearUiSelection">
-      <div class="brand" @mousedown.prevent>本地书库</div>
+      <div class="brand" @mousedown.prevent>轻阅</div>
       <div class="tabs">
         <button class="tab" :class="{ active: books.filter === 'all' }" @click="setFilter('all')">全部</button>
         <button class="tab" :class="{ active: books.filter === 'favorite' }" @click="setFilter('favorite')">收藏</button>
@@ -231,10 +231,10 @@ async function onDrop(e: DragEvent) {
         阅读 {{ Math.round(stats.stats.totalMinutes) }} 分钟 · 连续 {{ stats.stats.streakDays }} 天
       </span>
       <button class="btn" @click="fileInput?.click()">导入文件</button>
-      <button class="btn ghost" title="清理内容相同的重复书籍" @click="onDedup">清理重复</button>
-      <button class="btn danger" title="删除全部书籍、进度与笔记" @click="onClearLibrary">清空书库</button>
+      <button class="btn ghost" title="清理内容相同的重复文件" @click="onDedup">清理重复</button>
+      <button class="btn danger" title="删除全部文件、进度与笔记" @click="onClearLibrary">清空文库</button>
       <button v-if="books.fsSupported" class="btn primary" @click="onLinkFolder">
-        {{ books.fsLinkedName ? `书库: ${books.fsLinkedName}` : '关联书库文件夹' }}
+        {{ books.fsLinkedName ? `文件夹: ${books.fsLinkedName}` : '关联文件夹' }}
       </button>
       <button v-if="books.fsLinkedName" class="btn ghost" @click="onRescan">扫描</button>
       <input
@@ -249,7 +249,7 @@ async function onDrop(e: DragEvent) {
 
     <div v-if="books.quotaWarning" class="warn">{{ books.quotaWarning }}</div>
     <div v-if="message" class="warn">{{ message }}</div>
-    <div v-if="dragging" class="warn">松开以导入书籍…</div>
+    <div v-if="dragging" class="warn">松开以导入文件…</div>
 
     <div v-if="books.books.length" class="shelf-toolbar">
       <div class="shelf-toolbar-row">
@@ -257,7 +257,7 @@ async function onDrop(e: DragEvent) {
           v-model="books.searchQuery"
           class="shelf-search"
           type="search"
-          placeholder="搜索书名或作者…"
+          placeholder="搜索标题或作者…"
           autocomplete="off"
         />
         <label class="shelf-sort">
@@ -306,15 +306,15 @@ async function onDrop(e: DragEvent) {
     </div>
 
     <div v-if="!books.books.length" class="empty">
-      <h2>还没有书籍</h2>
-      <p>导入 EPUB / TXT / PDF，或在桌面 Chrome/Edge 关联同级目录 <code>E:\Projects\Books</code>。</p>
+      <h2>还没有文件</h2>
+      <p>导入 EPUB / TXT / PDF 等文档，或在桌面 Chrome/Edge 关联同级目录 <code>E:\Projects\Books</code>。</p>
       <p style="margin-top: 1rem">
         <button class="btn primary" @click="fileInput?.click()">选择文件</button>
       </p>
     </div>
 
     <div v-else-if="!books.filtered.length" class="empty">
-      <h2>没有匹配的书籍</h2>
+      <h2>没有匹配的文件</h2>
       <p>试试调整搜索或筛选条件。</p>
       <p v-if="hasActiveNarrow" style="margin-top: 1rem">
         <button class="btn ghost" @click="clearNarrowFilters">清除筛选</button>
@@ -364,9 +364,9 @@ async function onDrop(e: DragEvent) {
 
     <div v-if="editing" class="modal-backdrop" @click.self="editing = null">
       <div class="modal">
-        <h3>编辑书籍信息</h3>
+        <h3>编辑文件信息</h3>
         <div class="field">
-          <label>书名</label>
+          <label>标题</label>
           <input v-model="editTitle" />
         </div>
         <div class="field">

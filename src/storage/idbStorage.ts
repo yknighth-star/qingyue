@@ -25,7 +25,7 @@ export const idbStorage: LibraryStorage = {
       if (!format) continue
       if (file.size > MAX_IDB_FILE_BYTES) {
         throw new Error(
-          `「${file.name}」超过 ${Math.round(MAX_IDB_FILE_BYTES / 1024 / 1024)}MB。请改用「关联书库文件夹」从磁盘读取大文件。`,
+          `「${file.name}」超过 ${Math.round(MAX_IDB_FILE_BYTES / 1024 / 1024)}MB。请改用「关联文件夹」从磁盘读取大文件。`,
         )
       }
       const contentHash = await sampleHash(file)

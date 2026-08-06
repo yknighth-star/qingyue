@@ -368,7 +368,7 @@ async function init() {
     }
     const blob = await books.getBlob(b.id)
     if (!blob) {
-      error.value = b.storage === 'fs' ? '无法读取书库文件，请重新关联文件夹' : '书籍文件缺失'
+      error.value = b.storage === 'fs' ? '无法读取文件，请重新关联文件夹' : '文件缺失'
       return
     }
 
@@ -725,8 +725,8 @@ function back() {
 async function confirmDeleteBook() {
   if (!book.value) return
   const ok = await confirmDialog({
-    title: '删除本书',
-    message: `确定删除「${book.value.title}」？\n将返回书架，阅读进度与笔记也会删除。`,
+    title: '删除此文件',
+    message: `确定删除「${book.value.title}」？\n将返回列表，阅读进度与笔记也会删除。`,
     confirmText: '删除',
     danger: true,
   })
@@ -882,7 +882,7 @@ async function confirmDeleteBook() {
       </div>
       <div class="panel-body toc-panel-body">
         <TocTree v-if="toc.length" :items="toc" @select="goToc" />
-        <p v-else style="color: var(--muted)">本书暂无目录。</p>
+        <p v-else style="color: var(--muted)">暂无目录。</p>
       </div>
     </aside>
 
@@ -1258,7 +1258,7 @@ async function confirmDeleteBook() {
           style="margin-top: 0.75rem; display: block; width: 100%"
           @click="confirmDeleteBook"
         >
-          删除本书
+          删除此文件
         </button>
       </div>
     </aside>
