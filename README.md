@@ -1,4 +1,4 @@
-# H5 Local Ebook Reader
+# h5-ebook-reader
 
 Vite + Vue 3 + TypeScript PWA ebook reader. Supports EPUB / TXT / PDF with local IndexedDB storage and optional desktop folder library (`E:\Projects\Books`).
 
