@@ -16,7 +16,7 @@ export const idbStorage: LibraryStorage = {
   kind: 'idb',
 
   async listBooks() {
-    return db.books.where('storage').equals('idb').toArray()
+    return (await booksRepo.list()).filter((b) => b.storage === 'idb')
   },
 
   async importFiles(files: File[]): Promise<ImportResult[]> {
@@ -30,8 +30,8 @@ export const idbStorage: LibraryStorage = {
         )
       }
       const contentHash = await sampleHash(file)
-      const existing = await db.books.where('storage').equals('idb').toArray()
-      const dup = existing.find((b) => b.contentHash === contentHash)
+      const existing = await booksRepo.listIncludingDeleted()
+      const dup = existing.find((b) => b.storage === 'idb' && b.contentHash === contentHash && !b.deletedAt)
       if (dup) {
         results.push({ book: dup, duplicated: true })
         continue
@@ -52,10 +52,7 @@ export const idbStorage: LibraryStorage = {
         contentHash,
         updatedAt: Date.now(),
       }
-      await db.transaction('rw', db.books, db.bookFiles, async () => {
-        await db.books.put(book)
-        await db.bookFiles.put({ bookId: book.id, blob: file, name: file.name })
-      })
+      await booksRepo.putWithBlob(book, file, file.name)
       results.push({ book })
     }
     return results
@@ -67,12 +64,7 @@ export const idbStorage: LibraryStorage = {
   },
 
   async deleteBook(bookId: string) {
-    await db.transaction('rw', db.books, db.bookFiles, db.progress, db.annotations, async () => {
-      await db.books.delete(bookId)
-      await db.bookFiles.delete(bookId)
-      await db.progress.delete(bookId)
-      await db.annotations.where('bookId').equals(bookId).delete()
-    })
+    await booksRepo.hardDelete(bookId, { removeBlob: true })
   },
 
   async updateBook(bookId: string, patch: Partial<BookRecord>) {

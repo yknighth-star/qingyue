@@ -4,9 +4,10 @@ import type { BookFormat, BookRecord } from '@/types'
  * File-side library adapters (IndexedDB blobs + File System Access).
  *
  * Write policy:
- * - App UI / Pinia should mutate metadata via `src/repos/*`.
- * - `idbStorage` / `fsStorage` may still touch Dexie for atomic import/delete
- *   (book row + blob / fs path). Prefer `booksRepo` for single-row metadata updates.
+ * - All book row / blob / cascade deletes go through `booksRepo`
+ *   (`put`, `putWithBlob`, `update`, `hardDelete`, `softDelete`).
+ * - Storage adapters handle File System Access / blob I/O only; they must not
+ *   call Dexie book mutations except via repos.
  */
 
 export interface ImportResult {

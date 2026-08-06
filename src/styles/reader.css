@@ -1,0 +1,184 @@
+.reader-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--reader-bg, #f3ead3);
+  color: var(--reader-fg, #3b2f2f);
+  position: relative;
+  overflow: hidden;
+}
+
+.reader-chrome {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--chrome-bg, rgba(243, 234, 211, 0.94));
+  color: var(--reader-fg, #3b2f2f);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(8px);
+  z-index: 30;
+  -webkit-user-select: none;
+  user-select: none;
+  caret-color: transparent;
+}
+
+.reader-chrome.bottom {
+  border-bottom: none;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  gap: 0.35rem;
+}
+
+.reader-chrome .chrome-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0.35rem 0.4rem;
+  border: none;
+  background: transparent;
+  color: var(--reader-fg, #3b2f2f);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  caret-color: transparent;
+}
+
+.reader-chrome .chrome-title:hover {
+  opacity: 0.82;
+}
+
+.reader-chrome .chrome-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.reader-chrome .chrome-progress {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.reader-chrome .chrome-percent {
+  font-size: 0.8rem;
+  min-width: 2.75rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-chrome .tts-dock {
+  display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.reader-chrome .tts-dock .tts-play {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+}
+
+.reader-chrome .tts-dock .tts-menu {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  padding-left: 0.35rem;
+  padding-right: 0.45rem;
+  min-width: 0;
+}
+
+.reader-chrome .tts-dock .tts-play.active {
+  background: rgba(196, 165, 116, 0.35);
+  border-color: rgba(196, 165, 116, 0.7);
+}
+
+.reader-chrome .btn,
+.reader-chrome .btn.ghost {
+  color: var(--reader-fg, #3b2f2f);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(59, 47, 47, 0.28);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.reader-chrome .btn:hover,
+.reader-chrome .btn.ghost:hover {
+  background: #fff;
+  border-color: rgba(59, 47, 47, 0.45);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+}
+
+.reader-chrome strong {
+  color: var(--reader-fg, #3b2f2f);
+  font-weight: 700;
+  -webkit-user-select: none;
+  user-select: none;
+  caret-color: transparent;
+  cursor: default;
+}
+
+.reader-chrome .btn,
+.reader-chrome .btn *,
+.topbar .btn,
+.topbar .btn *,
+.topbar .brand,
+.topbar .tab {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  caret-color: transparent !important;
+}
+
+/* Dark reader theme: keep chrome buttons light-on-dark */
+.reader-page[data-theme='dark'] .reader-chrome .btn,
+.reader-page[data-theme='dark'] .reader-chrome .btn.ghost {
+  color: #f0ebe3;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.28);
+  box-shadow: none;
+}
+
+.reader-page[data-theme='dark'] .reader-chrome .btn:hover,
+.reader-page[data-theme='dark'] .reader-chrome .btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.reader-page[data-theme='dark'] .reader-chrome strong,
+.reader-page[data-theme='dark'] .reader-chrome .chrome-title {
+  color: #f0ebe3;
+}
+
+.reader-stage {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  cursor: default;
+  caret-color: transparent;
+  /* Stage chrome stays non-selectable; body text opts in below */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.reader-stage .engine-host {
+  position: absolute;
+  inset: 0;
+  cursor: default;
+  caret-color: transparent;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.reader-stage .engine-host iframe {
+  cursor: default !important;
+}

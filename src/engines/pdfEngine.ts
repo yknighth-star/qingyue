@@ -11,6 +11,7 @@ import {
 import { createCurlGate, createHostSelectionBridge, createSearchHighlightState } from './shared'
 import { suppressHostCaret } from '@/utils/suppressCaret'
 import { selectionRectFromSel } from '@/utils/selectionToolbar'
+import { highlightAnnotInRoot } from '@/utils/domHighlight'
 import { indexOfIgnoreCase } from '@/utils/searchText'
 
 /**
@@ -53,6 +54,7 @@ export class PdfEngine implements ReaderEngine {
   private defaultPageHeight = 900
   /** A = no destructive evict; B = unload canvas but keep slots (default after fix). */
   private virtualize = true
+  private annots: AnnotationRecord[] = []
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -275,17 +277,27 @@ export class PdfEngine implements ReaderEngine {
   }
 
   applyAnnotations(annots: AnnotationRecord[]) {
+    this.annots = annots
     if (!this.pagesEl) return
     this.pagesEl.querySelectorAll('.pdf-bookmark-flag').forEach((n) => n.remove())
+    this.pagesEl.querySelectorAll('mark.annot').forEach((n) => {
+      const parent = n.parentNode
+      if (!parent) return
+      parent.replaceChild(document.createTextNode(n.textContent || ''), n)
+      parent.normalize()
+    })
     for (const a of annots) {
       if (a.locator.type !== 'pdf') continue
-      const pageEl = this.pagesEl.querySelector(`[data-page="${a.locator.page}"]`)
+      const pageEl = this.pagesEl.querySelector(`[data-page="${a.locator.page}"]`) as HTMLElement | null
       if (!pageEl) continue
       if (a.type === 'bookmark') {
         const flag = document.createElement('div')
         flag.className = 'pdf-bookmark-flag'
         flag.textContent = '书签'
         pageEl.appendChild(flag)
+      } else if ((a.type === 'highlight' || a.type === 'note') && a.selectedText) {
+        const layer = pageEl.querySelector('.pdf-text-layer') as HTMLElement | null
+        if (layer) highlightAnnotInRoot(layer, a.selectedText, a.color)
       }
     }
   }
@@ -300,12 +312,23 @@ export class PdfEngine implements ReaderEngine {
   captureSelection() {
     const sel = window.getSelection()
     const text = sel?.toString().trim()
-    if (!text) return null
-    if (this.pagesEl && sel?.anchorNode && !this.pagesEl.contains(sel.anchorNode)) return null
+    if (!text || !sel) return null
+    if (this.pagesEl && sel.anchorNode && !this.pagesEl.contains(sel.anchorNode)) return null
+    const anchorEl =
+      sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement
+    const pageEl = anchorEl?.closest('[data-page]') as HTMLElement | null
+    const pageNum = pageEl ? Number(pageEl.dataset.page) || this.page : this.page
+    let yRatio = 0
+    const rect = selectionRectFromSel(sel)
+    if (pageEl && rect) {
+      const pr = pageEl.getBoundingClientRect()
+      const h = Math.max(1, pr.height)
+      yRatio = Math.min(1, Math.max(0, (rect.top - pr.top) / h))
+    }
     return {
       text,
-      locator: { type: 'pdf' as const, page: this.page, yRatio: 0 },
-      rect: selectionRectFromSel(sel) ?? undefined,
+      locator: { type: 'pdf' as const, page: pageNum, yRatio },
+      rect: rect ?? undefined,
     }
   }
 
@@ -466,6 +489,8 @@ export class PdfEngine implements ReaderEngine {
       this.textCache.set(pageNum, parts.join(''))
       const q = this.searchHl.get()
       if (q) this.searchHl.applyRoot(layer, false)
+      // Re-paint highlights after text layer is ready (virtualized pages)
+      if (this.annots.length) this.applyAnnotations(this.annots)
     } catch {
       /* text layer is best-effort */
     }

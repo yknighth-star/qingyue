@@ -251,12 +251,13 @@ function onKey(e: KeyboardEvent) {
     e.preventDefault()
     void engine.value?.goToPercent?.(100)
   } else if (e.key === 't' || e.key === 'T') openPanel('toc')
-  else if (e.key === 'b' || e.key === 'B') void addBookmark()
-  else if (e.key === 'f' || e.key === 'F') {
+  else if ((e.key === 'b' || e.key === 'B') && engine.value?.capabilities.annotations !== false) {
+    void addBookmark()
+  } else if (e.key === 'f' || e.key === 'F') {
     const el = document.documentElement
     if (!document.fullscreenElement) void el.requestFullscreen?.()
     else void document.exitFullscreen?.()
-  } else if (e.key === '/') {
+  } else if (e.key === '/' && engine.value?.capabilities.search !== false) {
     e.preventDefault()
     openPanel('search')
   } else if (e.key === 'Escape') {
@@ -350,7 +351,13 @@ onBeforeUnmount(() => {
       </button>
       <div class="chrome-actions">
         <button class="btn ghost" @click="openPanel('toc')">目录</button>
-        <button class="btn ghost" @click="openPanel('search')">搜索</button>
+        <button
+          v-if="engine?.capabilities.search !== false"
+          class="btn ghost"
+          @click="openPanel('search')"
+        >
+          搜索
+        </button>
         <button class="btn ghost" title="排版" @click="openPanel('settings')">Aa</button>
         <button class="btn ghost" title="更多" @click="openPanel('more')">⋯</button>
       </div>
@@ -384,6 +391,7 @@ onBeforeUnmount(() => {
       v-if="selectionBar"
       :left="selectionBar.left"
       :top="selectionBar.top"
+      :show-highlights="engine?.capabilities.textHighlights !== false"
       @highlight="addHighlight"
       @copy="copySelection"
       @speak="speakSelection"
@@ -409,8 +417,22 @@ onBeforeUnmount(() => {
         </div>
         <span class="chrome-percent">{{ formatPercent(percent) }}</span>
       </div>
-      <button class="btn ghost" title="添加书签" @click="addBookmark">书签</button>
-      <button class="btn ghost" title="笔记与书签列表" @click="openPanel('annot')">笔记</button>
+      <button
+        v-if="engine?.capabilities.annotations !== false"
+        class="btn ghost"
+        title="添加书签"
+        @click="addBookmark"
+      >
+        书签
+      </button>
+      <button
+        v-if="engine?.capabilities.annotations !== false"
+        class="btn ghost"
+        title="笔记与书签列表"
+        @click="openPanel('annot')"
+      >
+        笔记
+      </button>
       <div class="tts-dock">
         <button
           type="button"

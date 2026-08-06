@@ -1,12 +1,12 @@
 import type { ImportResult } from '@/storage/types'
 import type { TtsController } from '@/utils/tts'
 
-/** Runtime shell: web today; desktop/mobile later via Tauri / Capacitor. */
+/** Runtime shell: web today; desktop later via Electron if approved; mobile later. */
 export type PlatformKind = 'web' | 'desktop' | 'ios' | 'android'
 
 export interface PlatformEnv {
   kind: PlatformKind
-  /** Desktop browsers / Tauri: link a library folder. Mobile usually false. */
+  /** Desktop browsers: link a library folder. Mobile usually false. */
   canLinkFolder: boolean
   /**
    * idb-or-folder — small files in IDB, large via folder reference (web/desktop).

@@ -1,0 +1,295 @@
+/* 仿真翻页：对齐微信读书/掌阅等 —— 书脊铰链翻折 + 折痕阴影（非卷轴） */
+.epub-reader,
+.txt-reader,
+.pdf-reader {
+  position: relative;
+  transform-style: preserve-3d;
+  will-change: transform, opacity, filter, box-shadow;
+  backface-visibility: hidden;
+}
+
+.curl-hold {
+  opacity: 0 !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.curl-out-next,
+.curl-out-prev,
+.curl-in-next,
+.curl-in-prev {
+  pointer-events: none;
+}
+
+/* 折痕光影 */
+.curl-out-next::after,
+.curl-out-prev::after,
+.curl-in-next::after,
+.curl-in-prev::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.curl-out-next::after {
+  background: linear-gradient(
+    to left,
+    rgba(0, 0, 0, 0.32) 0%,
+    rgba(0, 0, 0, 0.08) 28%,
+    transparent 55%
+  );
+  animation: foldShadeOut 0.38s ease-in forwards;
+}
+
+.curl-out-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.32) 0%,
+    rgba(0, 0, 0, 0.08) 28%,
+    transparent 55%
+  );
+  animation: foldShadeOut 0.38s ease-in forwards;
+}
+
+.curl-in-next::after,
+.curl-in-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.12) 0%,
+    transparent 40%
+  );
+  animation: foldShadeIn 0.3s ease-out forwards;
+}
+
+@keyframes foldShadeOut {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes foldShadeIn {
+  from {
+    opacity: 0.7;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/*
+ * 下一页：右手揭页，绕左侧书脊翻向左边（读者视角从右向左翻）
+ * 上一页：左手揭页，绕右侧翻回（从左向右）
+ */
+.curl-out-next {
+  transform-origin: left center;
+  animation: simOutNext 0.38s cubic-bezier(0.4, 0.0, 0.6, 1) forwards;
+}
+
+.curl-out-prev {
+  transform-origin: right center;
+  animation: simOutPrev 0.38s cubic-bezier(0.4, 0.0, 0.6, 1) forwards;
+}
+
+.curl-in-next {
+  transform-origin: left center;
+  animation: simInNext 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-in-prev {
+  transform-origin: right center;
+  animation: simInPrev 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+@keyframes simOutNext {
+  0% {
+    transform: perspective(2200px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: 0 0 0 transparent;
+  }
+  45% {
+    transform: perspective(2200px) rotateY(-48deg);
+    filter: brightness(0.94);
+    opacity: 1;
+    box-shadow: -12px 0 28px rgba(0, 0, 0, 0.18);
+  }
+  100% {
+    transform: perspective(2200px) rotateY(-98deg);
+    filter: brightness(0.72);
+    opacity: 0;
+    box-shadow: -28px 0 40px rgba(0, 0, 0, 0.28);
+  }
+}
+
+@keyframes simOutPrev {
+  0% {
+    transform: perspective(2200px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: 0 0 0 transparent;
+  }
+  45% {
+    transform: perspective(2200px) rotateY(48deg);
+    filter: brightness(0.94);
+    opacity: 1;
+    box-shadow: 12px 0 28px rgba(0, 0, 0, 0.18);
+  }
+  100% {
+    transform: perspective(2200px) rotateY(98deg);
+    filter: brightness(0.72);
+    opacity: 0;
+    box-shadow: 28px 0 40px rgba(0, 0, 0, 0.28);
+  }
+}
+
+/* 新页从下层显露后轻微落定（竞品常见：翻过即见底页，再短促收束） */
+@keyframes simInNext {
+  0% {
+    transform: perspective(2200px) translateX(10%) rotateY(-6deg);
+    filter: brightness(0.9);
+    opacity: 0.45;
+    box-shadow: inset 18px 0 36px rgba(0, 0, 0, 0.1);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+@keyframes simInPrev {
+  0% {
+    transform: perspective(2200px) translateX(-10%) rotateY(6deg);
+    filter: brightness(0.9);
+    opacity: 0.45;
+    box-shadow: inset -18px 0 36px rgba(0, 0, 0, 0.1);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+.reader-page[data-turn='scroll'] .edge-zone {
+  width: 6%;
+  opacity: 0.35;
+}
+
+.reader-page[data-turn='curl'] .reader-stage {
+  perspective: 2200px;
+  overflow: hidden;
+  background: var(--reader-bg, #f3ead3);
+}
+
+.seg-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.modal {
+  width: min(420px, 100%);
+  background: var(--bg-elevated);
+  border-radius: 16px;
+  padding: 1.1rem;
+  box-shadow: var(--shadow);
+}
+
+.modal h3 {
+  margin: 0 0 0.75rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(26, 31, 46, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.confirm-dialog {
+  width: min(400px, 100%);
+  padding: 1.15rem 1.2rem 1.1rem;
+  border-radius: 14px;
+  background: #f7f2ea;
+  color: #1a1f2e;
+  border: 1px solid rgba(26, 31, 46, 0.1);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+}
+
+.confirm-title {
+  margin: 0 0 0.65rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #1a1f2e;
+}
+
+.confirm-message {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: #3b4558;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 1.15rem;
+}
+
+.confirm-dialog .btn.ghost {
+  background: transparent;
+  border-color: rgba(26, 31, 46, 0.22);
+  color: #1a1f2e;
+}
+
+.confirm-dialog .btn.primary {
+  background: var(--accent, #c4a574);
+  color: #1a1f2e;
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.confirm-dialog .btn.danger {
+  background: #c45c5c;
+  color: #fff;
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.stats-chip {
+  font-size: 0.8rem;
+  color: var(--muted);
+}

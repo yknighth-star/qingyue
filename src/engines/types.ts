@@ -21,7 +21,10 @@ export interface SelectionCaptureEvent {
 /** Declared capabilities — UI can hide unsupported actions. */
 export interface EngineCapabilities {
   search: boolean
+  /** Bookmarks + annotation list / applyAnnotations */
   annotations: boolean
+  /** Paint selection-based text highlights in the content view */
+  textHighlights: boolean
   selection: boolean
   percentJump: boolean
 }
@@ -29,6 +32,7 @@ export interface EngineCapabilities {
 export const FULL_ENGINE_CAPABILITIES: EngineCapabilities = {
   search: true,
   annotations: true,
+  textHighlights: true,
   selection: true,
   percentJump: true,
 }

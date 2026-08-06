@@ -147,7 +147,7 @@ export const fsStorage: LibraryStorage = {
   kind: 'fs',
 
   async listBooks() {
-    return db.books.where('storage').equals('fs').toArray()
+    return (await booksRepo.list()).filter((b) => b.storage === 'fs')
   },
 
   async importFiles(files: File[]) {
@@ -162,11 +162,8 @@ export const fsStorage: LibraryStorage = {
   },
 
   async deleteBook(bookId: string) {
-    await db.transaction('rw', db.books, db.progress, db.annotations, async () => {
-      await db.books.delete(bookId)
-      await db.progress.delete(bookId)
-      await db.annotations.where('bookId').equals(bookId).delete()
-    })
+    // FS books have no IDB blob — only meta + progress + annots
+    await booksRepo.hardDelete(bookId, { removeBlob: false })
   },
 
   async updateBook(bookId: string, patch: Partial<BookRecord>) {
