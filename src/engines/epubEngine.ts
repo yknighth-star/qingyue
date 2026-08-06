@@ -4,9 +4,14 @@ import { applyThemeVars, effectiveTheme } from '@/utils/format'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
 import { indexOfIgnoreCase } from '@/utils/searchText'
-import type { ContentTapEvent, ReaderEngine, SelectionCaptureEvent } from './types'
+import {
+  FULL_ENGINE_CAPABILITIES,
+  type ContentTapEvent,
+  type ReaderEngine,
+  type SelectionCaptureEvent,
+} from './types'
+import { createCurlGate, createSearchHighlightState } from './shared'
 import { injectCaretSuppression } from '@/utils/suppressCaret'
-import { playCurlIn, playCurlOut } from '@/utils/pageCurl'
 
 type ContentsDoc = {
   document: Document
@@ -15,6 +20,7 @@ type ContentsDoc = {
 }
 
 export class EpubEngine implements ReaderEngine {
+  readonly capabilities = FULL_ENGINE_CAPABILITIES
   private book: Book | null = null
   private rendition: Rendition | null = null
   private container: HTMLElement | null = null
@@ -28,10 +34,10 @@ export class EpubEngine implements ReaderEngine {
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
   private boundDocs = new WeakSet<Document>()
   private pageTurn: PageTurnMode = 'slide'
-  private curling = false
   private selectionDebounce: number | null = null
   private appliedHighlightCfis: string[] = []
-  private activeSearchQuery: string | null = null
+  private readonly curl = createCurlGate()
+  private readonly searchHl = createSearchHighlightState()
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -129,11 +135,12 @@ export class EpubEngine implements ReaderEngine {
     this.containOverflowMedia(doc)
 
     // Re-apply search marks when chapter iframe mounts / remounts
-    if (this.activeSearchQuery && doc.body) {
+    if (this.searchHl.get() && doc.body) {
       this.ensureSearchHitStyle(doc)
       window.setTimeout(() => {
-        if (this.activeSearchQuery && doc.body) {
-          highlightSearchInRoot(doc.body, this.activeSearchQuery, true)
+        const q = this.searchHl.get()
+        if (q && doc.body) {
+          highlightSearchInRoot(doc.body, q, true)
         }
       }, 30)
     }
@@ -251,7 +258,7 @@ export class EpubEngine implements ReaderEngine {
     else if (locator.href) await this.rendition.display(locator.href)
     else await this.rendition.display(locator.spineIndex)
     await new Promise((r) => window.setTimeout(r, 50))
-    if (this.activeSearchQuery) this.applySearchHighlightToContents()
+    if (this.searchHl.get()) this.applySearchHighlightToContents()
   }
 
   async goToPercent(percent: number) {
@@ -261,35 +268,15 @@ export class EpubEngine implements ReaderEngine {
   }
 
   async next() {
-    if (this.pageTurn === 'curl') {
-      if (this.curling) return
-      this.curling = true
-      try {
-        await playCurlOut(this.container, 'next')
-        await this.rendition?.next()
-        await playCurlIn(this.container, 'next')
-      } finally {
-        this.curling = false
-      }
-      return
-    }
-    await this.rendition?.next()
+    await this.curl.run(this.pageTurn, this.container, 'next', async () => {
+      await this.rendition?.next()
+    })
   }
 
   async prev() {
-    if (this.pageTurn === 'curl') {
-      if (this.curling) return
-      this.curling = true
-      try {
-        await playCurlOut(this.container, 'prev')
-        await this.rendition?.prev()
-        await playCurlIn(this.container, 'prev')
-      } finally {
-        this.curling = false
-      }
-      return
-    }
-    await this.rendition?.prev()
+    await this.curl.run(this.pageTurn, this.container, 'prev', async () => {
+      await this.rendition?.prev()
+    })
   }
 
   async search(query: string): Promise<SearchHit[]> {
@@ -362,7 +349,7 @@ export class EpubEngine implements ReaderEngine {
   }
 
   highlightSearch(query: string | null) {
-    this.activeSearchQuery = query?.trim() || null
+    this.searchHl.set(query)
     this.applySearchHighlightToContents()
   }
 
@@ -371,15 +358,16 @@ export class EpubEngine implements ReaderEngine {
       this.rendition as unknown as { getContents?: () => ContentsDoc[] }
     )?.getContents?.()
     if (!contents?.length) return
+    const q = this.searchHl.get()
     for (const c of contents) {
       const body = c.document?.body
       if (!body) continue
-      if (!this.activeSearchQuery) {
+      if (!q) {
         clearSearchMarks(body)
         continue
       }
       this.ensureSearchHitStyle(c.document)
-      highlightSearchInRoot(body, this.activeSearchQuery, true)
+      highlightSearchInRoot(body, q, true)
     }
   }
 

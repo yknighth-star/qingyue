@@ -1,4 +1,5 @@
 import { db } from '@/db'
+import { booksRepo } from '@/repos'
 import { MAX_IDB_FILE_BYTES } from '@/types'
 import type { BookRecord } from '@/types'
 import {
@@ -75,6 +76,6 @@ export const idbStorage: LibraryStorage = {
   },
 
   async updateBook(bookId: string, patch: Partial<BookRecord>) {
-    await db.books.update(bookId, patch)
+    await booksRepo.update(bookId, patch)
   },
 }

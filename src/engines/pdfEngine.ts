@@ -1,12 +1,16 @@
 import * as pdfjs from 'pdfjs-dist'
-import type { PDFDocumentProxy } from 'pdfjs-dist'
+import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
 import { applyThemeVars, effectiveTheme } from '@/utils/format'
-import type { ReaderEngine, SelectionCaptureEvent } from './types'
+import {
+  FULL_ENGINE_CAPABILITIES,
+  type ContentTapEvent,
+  type ReaderEngine,
+  type SelectionCaptureEvent,
+} from './types'
+import { createCurlGate, createHostSelectionBridge, createSearchHighlightState } from './shared'
 import { suppressHostCaret } from '@/utils/suppressCaret'
-import { playCurlIn, playCurlOut } from '@/utils/pageCurl'
-import { buildSelectionEvent, selectionRectFromSel } from '@/utils/selectionToolbar'
-import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
+import { selectionRectFromSel } from '@/utils/selectionToolbar'
 import { indexOfIgnoreCase } from '@/utils/searchText'
 
 /**
@@ -16,6 +20,7 @@ import { indexOfIgnoreCase } from '@/utils/searchText'
 pdfjs.GlobalWorkerOptions.workerSrc = `${import.meta.env.BASE_URL}pdf.worker.min.mjs`
 
 export class PdfEngine implements ReaderEngine {
+  readonly capabilities = FULL_ENGINE_CAPABILITIES
   private pdf: PDFDocumentProxy | null = null
   private container: HTMLElement | null = null
   private pagesEl: HTMLElement | null = null
@@ -23,7 +28,6 @@ export class PdfEngine implements ReaderEngine {
   private settings: ReaderSettings | null = null
   private progressCb: ((p: { locator: Locator; percent: number }) => void) | null = null
   private wheelCb: ((deltaY: number) => void) | null = null
-  /** User zoom multiplier from settings (1 = fit container width) */
   private userZoom = 1
   private pdfQuality: 'smooth' | 'hd' = 'smooth'
   private rendering = false
@@ -33,11 +37,17 @@ export class PdfEngine implements ReaderEngine {
   private resizeTimer: number | null = null
   private lastRenderKey = ''
   private pageTurn: PageTurnMode = 'slide'
-  private curling = false
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
-  private selectionDebounce: number | null = null
-  private selectingPointer = false
-  private activeSearchQuery: string | null = null
+  private readonly curl = createCurlGate()
+  private readonly searchHl = createSearchHighlightState()
+  private selectionBridge = createHostSelectionBridge({
+    getRoot: () => this.pagesEl,
+    capture: () => this.captureSelection(),
+    onEmit: (ev) => this.selectionCb?.(ev),
+  })
+  /** Cached page plain text for search (built lazily / incrementally). */
+  private textCache = new Map<number, string>()
+  private textLayerGen = 0
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -60,15 +70,13 @@ export class PdfEngine implements ReaderEngine {
     this.pagesEl = pages
     pages.addEventListener('scroll', this.onScroll, { passive: true })
     pages.addEventListener('wheel', this.onWheelEvent, { passive: false })
-    this.bindSelectionEvents(pages)
+    this.selectionBridge.bind(pages)
     suppressHostCaret(pages)
     this.observeResize(pages)
 
-    // First page ASAP — neighbors + outline load after open returns
-    await this.renderPage(this.page)
+    await this.renderVisible(true)
     this.emitProgress()
     void this.loadOutline()
-    void this.renderNeighbors()
   }
 
   private async loadOutline() {
@@ -81,47 +89,18 @@ export class PdfEngine implements ReaderEngine {
     }
   }
 
-  private bindSelectionEvents(el: HTMLElement) {
-    el.addEventListener('mousedown', () => {
-      this.selectingPointer = true
-    })
-    el.addEventListener('mouseup', (e) => {
-      this.selectingPointer = false
-      this.scheduleEmitSelection(e.clientX, e.clientY)
-    })
-    document.addEventListener('selectionchange', this.onDocSelectionChange)
-  }
-
-  private onDocSelectionChange = () => {
-    if (!this.pagesEl || this.selectingPointer) return
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed || !sel.toString().trim()) return
-    if (!this.pagesEl.contains(sel.anchorNode)) return
-    this.scheduleEmitSelection()
-  }
-
-  private scheduleEmitSelection(fallbackX?: number, fallbackY?: number) {
-    if (this.selectionDebounce) window.clearTimeout(this.selectionDebounce)
-    this.selectionDebounce = window.setTimeout(() => {
-      this.selectionDebounce = null
-      const cap = this.captureSelection()
-      if (!cap?.text) return
-      const ev = buildSelectionEvent(cap.text, cap.locator, cap.rect ?? null, fallbackX, fallbackY)
-      if (ev) this.selectionCb?.(ev)
-    }, 50)
-  }
-
   destroy() {
-    if (this.selectionDebounce) window.clearTimeout(this.selectionDebounce)
+    this.textLayerGen += 1
     if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
     this.resizeObserver?.disconnect()
     this.resizeObserver = null
-    document.removeEventListener('selectionchange', this.onDocSelectionChange)
+    this.selectionBridge.destroy()
     if (this.pagesEl) {
       this.pagesEl.removeEventListener('scroll', this.onScroll)
       this.pagesEl.removeEventListener('wheel', this.onWheelEvent)
     }
     this.selectionCb = null
+    this.textCache.clear()
     this.pdf?.destroy()
     this.pdf = null
     if (this.container) this.container.innerHTML = ''
@@ -154,7 +133,7 @@ export class PdfEngine implements ReaderEngine {
       ? this.toc
       : Array.from({ length: this.pdf?.numPages || 0 }, (_, i) => ({
           id: `p${i + 1}`,
-          label: `�?${i + 1} 页`,
+          label: `第 ${i + 1} 页`,
           locator: { type: 'pdf' as const, page: i + 1, yRatio: 0 },
         }))
   }
@@ -181,20 +160,16 @@ export class PdfEngine implements ReaderEngine {
         this.pagesEl.scrollTop = top
       }
     }
-    if (this.activeSearchQuery) this.highlightSearch(this.activeSearchQuery)
+    if (this.searchHl.get()) this.highlightSearch(this.searchHl.get())
   }
 
   highlightSearch(query: string | null) {
-    this.activeSearchQuery = query?.trim() || null
+    this.searchHl.set(query)
     if (!this.pagesEl) return
-    clearSearchMarks(this.pagesEl)
-    if (!this.activeSearchQuery) return
+    this.searchHl.clearRoot(this.pagesEl)
+    if (!this.searchHl.get()) return
     const layers = this.pagesEl.querySelectorAll('.pdf-text-layer, .pdf-page')
-    for (const layer of layers) {
-      if ((layer as HTMLElement).innerText?.trim()) {
-        highlightSearchInRoot(layer as HTMLElement, this.activeSearchQuery, true)
-      }
-    }
+    this.searchHl.applyRoots(layers, true)
   }
 
   async goToPercent(percent: number) {
@@ -226,19 +201,7 @@ export class PdfEngine implements ReaderEngine {
         this.emitProgress()
       }
     }
-    if (this.pageTurn === 'curl') {
-      if (this.curling) return
-      this.curling = true
-      try {
-        await playCurlOut(this.container, 'next')
-        await turn()
-        await playCurlIn(this.container, 'next')
-      } finally {
-        this.curling = false
-      }
-      return
-    }
-    await turn()
+    await this.curl.run(this.pageTurn, this.container, 'next', turn)
   }
 
   async prev() {
@@ -255,29 +218,17 @@ export class PdfEngine implements ReaderEngine {
         this.emitProgress()
       }
     }
-    if (this.pageTurn === 'curl') {
-      if (this.curling) return
-      this.curling = true
-      try {
-        await playCurlOut(this.container, 'prev')
-        await turn()
-        await playCurlIn(this.container, 'prev')
-      } finally {
-        this.curling = false
-      }
-      return
-    }
-    await turn()
+    await this.curl.run(this.pageTurn, this.container, 'prev', turn)
   }
 
   async search(query: string): Promise<SearchHit[]> {
     if (!this.pdf || !query.trim()) return []
     const q = query.trim()
     const hits: SearchHit[] = []
-    for (let p = 1; p <= this.pdf.numPages && hits.length < 40; p++) {
-      const page = await this.pdf.getPage(p)
-      const tc = await page.getTextContent()
-      const text = tc.items.map((it) => ('str' in it ? it.str : '')).join('')
+    const total = this.pdf.numPages
+    // Batch with yields so the UI stays responsive on large PDFs
+    for (let p = 1; p <= total && hits.length < 40; p++) {
+      const text = await this.getPageText(p)
       let idx = 0
       while (hits.length < 40) {
         const found = indexOfIgnoreCase(text, q, idx)
@@ -288,6 +239,7 @@ export class PdfEngine implements ReaderEngine {
         })
         idx = found + Math.max(1, q.length)
       }
+      if (p % 4 === 0) await yieldToMain()
     }
     return hits
   }
@@ -298,6 +250,10 @@ export class PdfEngine implements ReaderEngine {
 
   onWheel(cb: (deltaY: number) => void) {
     this.wheelCb = cb
+  }
+
+  onContentTap(_cb: (e: ContentTapEvent) => void) {
+    // PDF uses host stage click zones.
   }
 
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {
@@ -321,6 +277,9 @@ export class PdfEngine implements ReaderEngine {
   }
 
   getSelectableText() {
+    const layer = this.pagesEl?.querySelector(`[data-page="${this.page}"] .pdf-text-layer`)
+    const fromLayer = layer?.textContent?.trim()
+    if (fromLayer) return fromLayer
     return window.getSelection()?.toString().trim() || ''
   }
 
@@ -347,7 +306,6 @@ export class PdfEngine implements ReaderEngine {
     this.resizeObserver.observe(el)
   }
 
-  /** Fit page to container width; DPR capped by quality mode for mobile speed. */
   private getRenderMetrics(pageWidthAtScale1: number) {
     const padding = 24
     const containerWidth = Math.max(
@@ -373,9 +331,21 @@ export class PdfEngine implements ReaderEngine {
     }
   }
 
+  private async getPageText(pageNum: number): Promise<string> {
+    const cached = this.textCache.get(pageNum)
+    if (cached != null) return cached
+    if (!this.pdf) return ''
+    const page = await this.pdf.getPage(pageNum)
+    const tc = await page.getTextContent()
+    const text = tc.items.map((it) => ('str' in it ? it.str : '')).join('')
+    this.textCache.set(pageNum, text)
+    return text
+  }
+
   private async renderPage(pageNum: number) {
     if (!this.pdf || !this.pagesEl) return
-    if (this.pagesEl.querySelector(`[data-page="${pageNum}"]`)) return
+    const existing = this.pagesEl.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
+    if (existing?.dataset.filled === '1') return
 
     const page = await this.pdf.getPage(pageNum)
     const base = page.getViewport({ scale: 1 })
@@ -384,12 +354,19 @@ export class PdfEngine implements ReaderEngine {
     if (key !== this.lastRenderKey) {
       this.pagesEl.innerHTML = ''
       this.lastRenderKey = key
+      this.textLayerGen += 1
     }
 
     const viewport = page.getViewport({ scale: fitScale })
-    const wrap = document.createElement('div')
-    wrap.className = 'pdf-page'
-    wrap.dataset.page = String(pageNum)
+    let wrap = this.pagesEl.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
+    if (!wrap) {
+      wrap = document.createElement('div')
+      wrap.className = 'pdf-page'
+      wrap.dataset.page = String(pageNum)
+      this.pagesEl.appendChild(wrap)
+    }
+    wrap.innerHTML = ''
+    wrap.dataset.filled = '1'
 
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
@@ -406,19 +383,70 @@ export class PdfEngine implements ReaderEngine {
     const textLayer = document.createElement('div')
     textLayer.className = 'pdf-text-layer'
     wrap.appendChild(textLayer)
-    this.pagesEl.appendChild(wrap)
+
     await page.render({ canvasContext: ctx, viewport }).promise
 
+    // Defer text layer so first paint stays snappy
+    const gen = this.textLayerGen
+    scheduleIdle(() => {
+      if (gen !== this.textLayerGen || !wrap?.isConnected) return
+      void this.fillTextLayer(page, viewport, textLayer, pageNum, gen)
+    })
+
+    this.sortPageNodes()
+  }
+
+  private sortPageNodes() {
+    if (!this.pagesEl) return
     const nodes = [...this.pagesEl.children] as HTMLElement[]
     nodes.sort((a, b) => Number(a.dataset.page) - Number(b.dataset.page))
     nodes.forEach((n) => this.pagesEl!.appendChild(n))
   }
 
-  private async renderNeighbors() {
-    const { start, end } = this.prefetchRange()
-    for (let p = start; p <= end; p++) {
-      if (p === this.page) continue
-      await this.renderPage(p)
+  private async fillTextLayer(
+    page: PDFPageProxy,
+    viewport: { width: number; height: number; convertToViewportPoint: (x: number, y: number) => number[] },
+    layer: HTMLElement,
+    pageNum: number,
+    gen: number,
+  ) {
+    try {
+      const tc = await page.getTextContent()
+      if (gen !== this.textLayerGen || !layer.isConnected) return
+      const parts: string[] = []
+      layer.innerHTML = ''
+      for (const item of tc.items) {
+        if (!('str' in item) || !item.str) continue
+        parts.push(item.str)
+        const tx = item.transform
+        if (!tx || tx.length < 6) continue
+        const [x, y] = viewport.convertToViewportPoint(tx[4], tx[5])
+        const span = document.createElement('span')
+        span.textContent = item.str
+        const scale = viewport.width / page.getViewport({ scale: 1 }).width
+        const fh = Math.max(6, Math.hypot(tx[2], tx[3]) * scale)
+        span.style.left = `${x}px`
+        span.style.top = `${y - fh}px`
+        span.style.fontSize = `${fh}px`
+        layer.appendChild(span)
+      }
+      this.textCache.set(pageNum, parts.join(''))
+      const q = this.searchHl.get()
+      if (q) this.searchHl.applyRoot(layer, false)
+    } catch {
+      /* text layer is best-effort */
+    }
+  }
+
+  /** Drop canvases outside the live window to cap memory. */
+  private evictOutside(start: number, end: number) {
+    if (!this.pagesEl) return
+    const nodes = [...this.pagesEl.querySelectorAll('.pdf-page')] as HTMLElement[]
+    for (const el of nodes) {
+      const n = Number(el.dataset.page)
+      if (n < start || n > end) {
+        el.remove()
+      }
     }
   }
 
@@ -433,15 +461,16 @@ export class PdfEngine implements ReaderEngine {
       if (force || key !== this.lastRenderKey) {
         this.pagesEl.innerHTML = ''
         this.lastRenderKey = key
+        this.textLayerGen += 1
       }
 
       const { start, end } = this.prefetchRange()
-      // Current page first for responsiveness
       await this.renderPage(this.page)
       for (let p = start; p <= end; p++) {
         if (p === this.page) continue
         await this.renderPage(p)
       }
+      this.evictOutside(start, end)
     } finally {
       this.rendering = false
     }
@@ -499,10 +528,24 @@ function maxDprForQuality(quality: 'smooth' | 'hd'): number {
   if (quality === 'hd') {
     return w < 768 ? 2 : 3
   }
-  // smooth (default): favor speed on phones
   if (w < 768) return 1.5
   if (w < 1100) return 2
   return 2.5
+}
+
+function yieldToMain() {
+  return new Promise<void>((r) => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => r())
+    else setTimeout(r, 0)
+  })
+}
+
+function scheduleIdle(fn: () => void) {
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(() => fn(), { timeout: 800 })
+  } else {
+    setTimeout(fn, 40)
+  }
 }
 
 type PdfOutlineNode = {

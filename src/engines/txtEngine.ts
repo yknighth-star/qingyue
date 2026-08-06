@@ -1,14 +1,19 @@
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
 import { decodeTextBlob, splitTxtChapters, type TxtChapter } from '@/utils/encoding'
 import { applyThemeVars, effectiveTheme } from '@/utils/format'
-import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
 import { indexOfIgnoreCase } from '@/utils/searchText'
-import type { ReaderEngine, SelectionCaptureEvent } from './types'
+import {
+  FULL_ENGINE_CAPABILITIES,
+  type ContentTapEvent,
+  type ReaderEngine,
+  type SelectionCaptureEvent,
+} from './types'
+import { createCurlGate, createHostSelectionBridge, createSearchHighlightState } from './shared'
 import { suppressHostCaret } from '@/utils/suppressCaret'
-import { playCurlIn, playCurlOut } from '@/utils/pageCurl'
-import { buildSelectionEvent, selectionRectFromSel } from '@/utils/selectionToolbar'
+import { selectionRectFromSel } from '@/utils/selectionToolbar'
 
 export class TxtEngine implements ReaderEngine {
+  readonly capabilities = FULL_ENGINE_CAPABILITIES
   private text = ''
   private chapters: TxtChapter[] = []
   private chapterId = 0
@@ -20,11 +25,14 @@ export class TxtEngine implements ReaderEngine {
   private scrollTimer: number | null = null
   private autoRaf = 0
   private pageTurn: PageTurnMode = 'slide'
-  private curling = false
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
-  private selectionDebounce: number | null = null
-  private selectingPointer = false
-  private activeSearchQuery: string | null = null
+  private readonly curl = createCurlGate()
+  private readonly searchHl = createSearchHighlightState()
+  private selectionBridge = createHostSelectionBridge({
+    getRoot: () => this.contentEl,
+    capture: () => this.captureSelection(),
+    onEmit: (ev) => this.selectionCb?.(ev),
+  })
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -46,44 +54,13 @@ export class TxtEngine implements ReaderEngine {
     this.renderChapter()
     content.addEventListener('scroll', this.onScroll, { passive: true })
     content.addEventListener('wheel', this.onWheelEvent, { passive: false })
-    this.bindSelectionEvents(content)
+    this.selectionBridge.bind(content)
     suppressHostCaret(content)
-  }
-
-  private bindSelectionEvents(el: HTMLElement) {
-    el.addEventListener('mousedown', () => {
-      this.selectingPointer = true
-    })
-    el.addEventListener('mouseup', (e) => {
-      this.selectingPointer = false
-      this.scheduleEmitSelection(e.clientX, e.clientY)
-    })
-    document.addEventListener('selectionchange', this.onDocSelectionChange)
-  }
-
-  private onDocSelectionChange = () => {
-    if (!this.contentEl || this.selectingPointer) return
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed || !sel.toString().trim()) return
-    if (!this.contentEl.contains(sel.anchorNode)) return
-    this.scheduleEmitSelection()
-  }
-
-  private scheduleEmitSelection(fallbackX?: number, fallbackY?: number) {
-    if (this.selectionDebounce) window.clearTimeout(this.selectionDebounce)
-    this.selectionDebounce = window.setTimeout(() => {
-      this.selectionDebounce = null
-      const cap = this.captureSelection()
-      if (!cap?.text) return
-      const ev = buildSelectionEvent(cap.text, cap.locator, cap.rect ?? null, fallbackX, fallbackY)
-      if (ev) this.selectionCb?.(ev)
-    }, 50)
   }
 
   destroy() {
     this.stopAutoScroll()
-    if (this.selectionDebounce) window.clearTimeout(this.selectionDebounce)
-    document.removeEventListener('selectionchange', this.onDocSelectionChange)
+    this.selectionBridge.destroy()
     if (this.contentEl) {
       this.contentEl.removeEventListener('scroll', this.onScroll)
       this.contentEl.removeEventListener('wheel', this.onWheelEvent)
@@ -144,18 +121,14 @@ export class TxtEngine implements ReaderEngine {
       const max = this.contentEl.scrollHeight - this.contentEl.clientHeight
       this.contentEl.scrollTop = max * (locator.offset || 0)
     }
-    if (this.activeSearchQuery) {
-      highlightSearchInRoot(this.contentEl, this.activeSearchQuery, true)
+    if (this.searchHl.get()) {
+      this.searchHl.applyRoot(this.contentEl, true)
     }
   }
 
   highlightSearch(query: string | null) {
-    this.activeSearchQuery = query?.trim() || null
-    if (!this.activeSearchQuery) {
-      clearSearchMarks(this.contentEl)
-      return
-    }
-    highlightSearchInRoot(this.contentEl, this.activeSearchQuery, true)
+    this.searchHl.set(query)
+    this.searchHl.applyRoot(this.contentEl, true)
   }
 
   async goToPercent(percent: number) {
@@ -176,7 +149,7 @@ export class TxtEngine implements ReaderEngine {
     if (!el) return
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8
     if (!atBottom) {
-      await this.withCurl('next', () => {
+      await this.curl.run(this.pageTurn, this.container, 'next', () => {
         const step = this.pageTurn === 'scroll' ? el.clientHeight * 0.7 : el.clientHeight * 0.92
         el.scrollBy({
           top: step,
@@ -187,7 +160,7 @@ export class TxtEngine implements ReaderEngine {
       return
     }
     if (this.chapterId < this.chapters.length - 1) {
-      await this.withCurl('next', () => {
+      await this.curl.run(this.pageTurn, this.container, 'next', () => {
         this.chapterId++
         this.renderChapter()
         this.emitProgress()
@@ -199,7 +172,7 @@ export class TxtEngine implements ReaderEngine {
     const el = this.contentEl
     if (!el) return
     if (el.scrollTop > 8) {
-      await this.withCurl('prev', () => {
+      await this.curl.run(this.pageTurn, this.container, 'prev', () => {
         const step = this.pageTurn === 'scroll' ? el.clientHeight * 0.7 : el.clientHeight * 0.92
         el.scrollBy({
           top: -step,
@@ -210,29 +183,13 @@ export class TxtEngine implements ReaderEngine {
       return
     }
     if (this.chapterId > 0) {
-      await this.withCurl('prev', async () => {
+      await this.curl.run(this.pageTurn, this.container, 'prev', async () => {
         this.chapterId--
         this.renderChapter()
         await new Promise((r) => requestAnimationFrame(r))
         el.scrollTop = el.scrollHeight
         this.emitProgress()
       })
-    }
-  }
-
-  private async withCurl(dir: 'next' | 'prev', action: () => void | Promise<void>) {
-    if (this.pageTurn !== 'curl') {
-      await action()
-      return
-    }
-    if (this.curling) return
-    this.curling = true
-    try {
-      await playCurlOut(this.container, dir)
-      await action()
-      await playCurlIn(this.container, dir)
-    } finally {
-      this.curling = false
     }
   }
 
@@ -266,6 +223,10 @@ export class TxtEngine implements ReaderEngine {
 
   onWheel(cb: (deltaY: number) => void) {
     this.wheelCb = cb
+  }
+
+  onContentTap(_cb: (e: ContentTapEvent) => void) {
+    // TXT uses host stage click zones; EPUB iframes need engine tap forwarding.
   }
 
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {
@@ -364,8 +325,8 @@ export class TxtEngine implements ReaderEngine {
     this.contentEl.innerHTML = titleHtml + bodyHtml
     this.contentEl.scrollTop = 0
     this.emitProgress()
-    if (this.activeSearchQuery) {
-      highlightSearchInRoot(this.contentEl, this.activeSearchQuery, false)
+    if (this.searchHl.get()) {
+      this.searchHl.applyRoot(this.contentEl, false)
     }
   }
 

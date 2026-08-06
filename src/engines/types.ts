@@ -18,7 +18,23 @@ export interface SelectionCaptureEvent {
   rect: { top: number; left: number; bottom: number; right: number }
 }
 
+/** Declared capabilities — UI can hide unsupported actions. */
+export interface EngineCapabilities {
+  search: boolean
+  annotations: boolean
+  selection: boolean
+  percentJump: boolean
+}
+
+export const FULL_ENGINE_CAPABILITIES: EngineCapabilities = {
+  search: true,
+  annotations: true,
+  selection: true,
+  percentJump: true,
+}
+
 export interface ReaderEngine {
+  readonly capabilities: EngineCapabilities
   open(blob: Blob, settings: ReaderSettings, container: HTMLElement): Promise<void>
   destroy(): void
   applySettings(settings: ReaderSettings): void
@@ -26,20 +42,20 @@ export interface ReaderEngine {
   getProgress(): { locator: Locator; percent: number }
   goTo(locator: Locator): Promise<void> | void
   /** Jump roughly by reading progress 0–100 */
-  goToPercent?(percent: number): Promise<void> | void
+  goToPercent(percent: number): Promise<void> | void
   next(): Promise<void> | void
   prev(): Promise<void> | void
-  search?(query: string): Promise<SearchHit[]>
+  search(query: string): Promise<SearchHit[]>
   /** Temporarily highlight search matches in the current view; pass null/'' to clear. */
-  highlightSearch?(query: string | null): void
-  getSelectableText?(): string
-  onProgress?(cb: (p: { locator: Locator; percent: number }) => void): void
+  highlightSearch(query: string | null): void
+  getSelectableText(): string
+  onProgress(cb: (p: { locator: Locator; percent: number }) => void): void
   /** Wheel over content (including EPUB iframe). deltaY > 0 means scroll down. */
-  onWheel?(cb: (deltaY: number) => void): void
+  onWheel(cb: (deltaY: number) => void): void
   /** Click/tap inside content area (including EPUB iframe). */
-  onContentTap?(cb: (e: ContentTapEvent) => void): void
+  onContentTap(cb: (e: ContentTapEvent) => void): void
   /** Text selection ready (including EPUB iframe mouseup). */
-  onSelection?(cb: (e: SelectionCaptureEvent | null) => void): void
-  applyAnnotations?(annots: AnnotationRecord[]): void
-  captureSelection?(): { text: string; locator: Locator; rect?: SelectionCaptureEvent['rect'] } | null
+  onSelection(cb: (e: SelectionCaptureEvent | null) => void): void
+  applyAnnotations(annots: AnnotationRecord[]): void
+  captureSelection(): { text: string; locator: Locator; rect?: SelectionCaptureEvent['rect'] } | null
 }

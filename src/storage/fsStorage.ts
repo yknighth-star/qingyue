@@ -1,4 +1,5 @@
 import { db } from '@/db'
+import { booksRepo } from '@/repos'
 import type { BookRecord } from '@/types'
 import {
   detectFormat,
@@ -100,7 +101,7 @@ export async function scanLibraryFolder(): Promise<ImportResult[]> {
     if (dup) {
       const nextTags = tagsWithAutoFolder(dup.tags || [], path)
       if (nextTags.length !== (dup.tags || []).length) {
-        await db.books.update(dup.id, { tags: nextTags })
+        await booksRepo.update(dup.id, { tags: nextTags })
         dup.tags = nextTags
       }
       results.push({ book: dup, duplicated: true })
@@ -123,7 +124,7 @@ export async function scanLibraryFolder(): Promise<ImportResult[]> {
       contentHash,
       updatedAt: Date.now(),
     }
-    await db.books.put(book)
+    await booksRepo.put(book)
     existing.push(book)
     results.push({ book })
   }
@@ -169,7 +170,7 @@ export const fsStorage: LibraryStorage = {
   },
 
   async updateBook(bookId: string, patch: Partial<BookRecord>) {
-    await db.books.update(bookId, patch)
+    await booksRepo.update(bookId, patch)
   },
 }
 

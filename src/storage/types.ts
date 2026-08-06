@@ -1,5 +1,14 @@
 import type { BookFormat, BookRecord } from '@/types'
 
+/**
+ * File-side library adapters (IndexedDB blobs + File System Access).
+ *
+ * Write policy:
+ * - App UI / Pinia should mutate metadata via `src/repos/*`.
+ * - `idbStorage` / `fsStorage` may still touch Dexie for atomic import/delete
+ *   (book row + blob / fs path). Prefer `booksRepo` for single-row metadata updates.
+ */
+
 export interface ImportResult {
   book: BookRecord
   duplicated?: boolean

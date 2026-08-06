@@ -5,7 +5,7 @@ import { useBooksStore } from '@/stores/books'
 import type { AnnotationRecord, BookRecord, Locator } from '@/types'
 import { uid } from '@/storage/types'
 import { annotationsToJson, annotationsToMarkdown, downloadText } from '@/utils/export'
-import { getDictionaryProvider } from '@/utils/dictionary'
+import { getDictionaryProvider, formatDictionaryResult } from '@/utils/dictionary'
 import { placeToolbarAboveRect } from '@/utils/selectionToolbar'
 import { getPlatform } from '@/platform'
 
@@ -196,7 +196,7 @@ export function useSelectionAnnot(opts: {
     const word = selectionBar.value?.text?.trim() || ''
     if (!word) return
     const res = await getDictionaryProvider().lookup(word.slice(0, 32))
-    dictResult.value = res ? `${res.word}：${res.meanings.join('；')}` : '未找到释义'
+    dictResult.value = res ? formatDictionaryResult(res) : '未找到释义'
     clearSelectionBar()
   }
 

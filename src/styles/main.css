@@ -1004,10 +1004,24 @@ mark.search-hit {
 }
 
 .pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  opacity: 1;
   cursor: text;
   caret-color: transparent;
   -webkit-user-select: text;
   user-select: text;
+  pointer-events: auto;
+}
+
+.pdf-text-layer span {
+  position: absolute;
+  white-space: pre;
+  color: transparent;
+  transform-origin: 0% 0%;
+  cursor: text;
 }
 
 /* Forms / chrome keep normal text caret */

@@ -11,15 +11,15 @@ export interface DictionaryProvider {
   lookup(word: string): Promise<DictionaryResult | null>
 }
 
-/** Built-in stub — replace with local JSON lexicon later */
+/** Built-in stub — used until mini lexicon finishes loading */
 export const stubDictionary: DictionaryProvider = {
-  name: '本地词典（占位）',
+  name: '本地词典（加载中）',
   async lookup(word: string) {
     const w = word.trim()
     if (!w) return null
     return {
       word: w,
-      meanings: ['（词典接口已预留，可接入本地 JSON 词库）'],
+      meanings: ['词库加载中，请稍后重试'],
     }
   },
 }
@@ -32,4 +32,10 @@ export function setDictionaryProvider(p: DictionaryProvider) {
 
 export function getDictionaryProvider() {
   return active
+}
+
+/** Format popup text from a lookup result */
+export function formatDictionaryResult(res: DictionaryResult): string {
+  const ph = res.phonetic ? ` ${res.phonetic}` : ''
+  return `${res.word}${ph}：${res.meanings.join('；')}`
 }
