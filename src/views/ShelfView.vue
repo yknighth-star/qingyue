@@ -57,6 +57,17 @@ const coverUrls = computed(() => {
 
 onMounted(() => {
   void books.refresh()
+  // Prefetch reader chunk + engines while user browses the shelf
+  const schedule =
+    typeof window.requestIdleCallback === 'function'
+      ? (cb: () => void) => window.requestIdleCallback(() => cb(), { timeout: 2500 })
+      : (cb: () => void) => window.setTimeout(cb, 600)
+  schedule(() => {
+    void import('@/views/ReaderView.vue')
+    void import('@/engines/pdfEngine')
+    void import('@/engines/epubEngine')
+    void import('@/engines/txtEngine')
+  })
 })
 
 function setFilter(f: ShelfFilter) {

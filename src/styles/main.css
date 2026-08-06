@@ -162,6 +162,57 @@ a {
   box-shadow: var(--shadow);
 }
 
+.open-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--reader-bg, #12141a) 88%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.open-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 1.4rem 1.6rem;
+  border-radius: 16px;
+  background: var(--bg-elevated, #1c2330);
+  color: var(--fg, #f0ebe3);
+  box-shadow: var(--shadow);
+  max-width: min(320px, 86vw);
+  text-align: center;
+}
+
+.open-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(196, 165, 116, 0.25);
+  border-top-color: var(--accent, #c4a574);
+  border-radius: 50%;
+  animation: openSpin 0.8s linear infinite;
+}
+
+@keyframes openSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.open-title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.open-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted, #9aa3b2);
+}
+
 .dict-popup {
   position: absolute;
   left: 12px;

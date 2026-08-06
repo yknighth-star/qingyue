@@ -59,7 +59,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        cacheId: 'qingyue-v1',
+        cacheId: 'qingyue-v2',
         cleanupOutdatedCaches: true,
         globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,

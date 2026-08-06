@@ -38,6 +38,8 @@ const host = ref<HTMLElement | null>(null)
 const book = ref<BookRecord | null>(null)
 const engine = ref<ReaderEngine | null>(null)
 const percent = ref(0)
+const opening = ref(true)
+const openHint = ref('正在打开…')
 const chromeVisible = ref(true)
 const panel = ref<'none' | 'toc' | 'annot' | 'settings' | 'search' | 'tts' | 'more'>('none')
 const toc = ref<TocItem[]>([])
@@ -357,20 +359,26 @@ function onProgressKey(e: KeyboardEvent) {
 
 async function init() {
   error.value = ''
+  opening.value = true
+  openHint.value = '正在读取文件…'
   try {
     await books.refresh()
     await settingsStore.load()
     const b = books.books.find((x) => x.id === props.id) || null
     book.value = b
     if (!b) {
-      error.value = '未找到书籍'
+      error.value = '未找到文件'
       return
     }
+    openHint.value = '正在加载文件数据…'
     const blob = await books.getBlob(b.id)
     if (!blob) {
       error.value = b.storage === 'fs' ? '无法读取文件，请重新关联文件夹' : '文件缺失'
       return
     }
+
+    openHint.value =
+      b.format === 'pdf' ? '正在解析 PDF（优先显示首页）…' : b.format === 'epub' ? '正在解析 EPUB…' : '正在加载文本…'
 
     let eng: ReaderEngine
     if (b.format === 'txt') eng = new TxtEngine()
@@ -383,6 +391,9 @@ async function init() {
       return
     }
     await eng.open(blob, settings.value, host.value)
+    // First page is ready — dismiss loading; finish secondary work in background
+    opening.value = false
+
     eng.onProgress?.((p) => {
       percent.value = p.percent
       scheduleSave(p.locator, p.percent)
@@ -392,17 +403,27 @@ async function init() {
     eng.onSelection?.(onEngineSelection)
     engine.value = eng
     toc.value = eng.getToc()
-    annots.value = await books.listAnnotations(b.id)
+    percent.value = eng.getProgress().percent
 
-    const saved = await books.getProgress(b.id)
-    if (saved?.locator) await eng.goTo(saved.locator)
-    eng.applyAnnotations?.(annots.value)
+    void (async () => {
+      annots.value = await books.listAnnotations(b.id)
+      const saved = await books.getProgress(b.id)
+      if (saved?.locator) await eng.goTo(saved.locator)
+      // TOC may arrive slightly later for PDF
+      window.setTimeout(() => {
+        toc.value = eng.getToc()
+      }, 400)
+      eng.applyAnnotations?.(annots.value)
+    })()
+
     stats.startSession(b.id)
   } catch (err) {
     console.error(err)
-    error.value = err instanceof Error ? `打开失败：${err.message}` : '打开书籍失败'
+    error.value = err instanceof Error ? `打开失败：${err.message}` : '打开文件失败'
     engine.value?.destroy()
     engine.value = null
+  } finally {
+    opening.value = false
   }
 }
 
@@ -767,6 +788,19 @@ async function confirmDeleteBook() {
     <div v-if="statusMsg" class="warn status-toast">{{ statusMsg }}</div>
 
     <div
+      v-if="opening"
+      class="open-overlay"
+      role="status"
+      aria-live="polite"
+    >
+      <div class="open-card">
+        <div class="open-spinner" aria-hidden="true" />
+        <p class="open-title">{{ book?.title || '轻阅' }}</p>
+        <p class="open-hint">{{ openHint }}</p>
+      </div>
+    </div>
+
+    <div
       ref="stageRef"
       class="reader-stage"
       @pointerup="onPointerUp"
@@ -1110,7 +1144,29 @@ async function confirmDeleteBook() {
           />
         </div>
         <div v-if="book?.format === 'pdf'" class="field">
-          <label>PDF 清晰度 / 缩放 {{ Math.round((settings.pdfZoom ?? 1) * 100) }}%</label>
+          <label>PDF 画质</label>
+          <div class="seg">
+            <button
+              type="button"
+              class="seg-btn"
+              :class="{ active: (settings.pdfQuality || 'smooth') === 'smooth' }"
+              @click="settingsStore.update({ pdfQuality: 'smooth' })"
+            >
+              流畅
+            </button>
+            <button
+              type="button"
+              class="seg-btn"
+              :class="{ active: settings.pdfQuality === 'hd' }"
+              @click="settingsStore.update({ pdfQuality: 'hd' })"
+            >
+              高清
+            </button>
+          </div>
+          <p class="seg-hint">手机默认「流畅」更快；需要更清晰时再开「高清」。</p>
+        </div>
+        <div v-if="book?.format === 'pdf'" class="field">
+          <label>PDF 缩放 {{ Math.round((settings.pdfZoom ?? 1) * 100) }}%</label>
           <input
             type="range"
             min="0.6"
@@ -1119,7 +1175,7 @@ async function confirmDeleteBook() {
             :value="settings.pdfZoom ?? 1"
             @input="settingsStore.update({ pdfZoom: Number(($event.target as HTMLInputElement).value) })"
           />
-          <p class="seg-hint">按屏宽适配并按屏幕像素比渲染；调高可更清晰，更耗内存。</p>
+          <p class="seg-hint">按屏宽适配；与画质叠加影响清晰度与耗电。</p>
         </div>
         <div class="field">
           <label>自动滚屏速度 {{ settings.autoScrollSpeed }}（0 关闭）</label>

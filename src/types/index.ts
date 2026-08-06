@@ -75,6 +75,8 @@ export interface ReaderSettings {
   brightness: number
   /** PDF display zoom multiplier (1 = fit width) */
   pdfZoom: number
+  /** PDF render quality: smooth = faster on mobile; hd = sharper */
+  pdfQuality: 'smooth' | 'hd'
   autoScrollSpeed: number
   dualColumn: boolean
   ttsRate: number
@@ -166,6 +168,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   pageTurn: 'slide',
   brightness: 1,
   pdfZoom: 1,
+  pdfQuality: 'smooth',
   autoScrollSpeed: 0,
   dualColumn: false,
   ttsRate: 1,
