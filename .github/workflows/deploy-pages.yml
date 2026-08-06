@@ -36,9 +36,19 @@ jobs:
       - name: SPA 404 fallback
         run: cp dist/index.html dist/404.html
 
+      - name: Verify production dist (not Vite dev index)
+        run: |
+          test -f dist/index.html
+          test -f dist/.nojekyll
+          ! grep -q 'src/main.ts' dist/index.html
+          grep -q '/h5-ebook-reader/' dist/index.html
+          ls -la dist | head -40
+
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
           force_orphan: true
+          # Ensure Pages serves this branch, not main source tree
+          publish_branch: gh-pages

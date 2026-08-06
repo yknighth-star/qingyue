@@ -29,8 +29,10 @@ https://yknighth-star.github.io/h5-ebook-reader/
 
 1. Open https://github.com/yknighth-star/h5-ebook-reader/settings/pages
 2. Under **Build and deployment** → **Source**, choose **Deploy from a branch**
-3. Branch: **gh-pages** / **/ (root)** → Save
-4. Wait 1–2 minutes after the Actions workflow finishes
+3. Branch must be **gh-pages** / **/ (root)** → Save  
+   **Do not** select `main` — that publishes the Vite source `index.html` and breaks PDF/assets.
+4. Wait for Actions `Deploy GitHub Pages` to finish
+5. Hard-refresh the site (or clear site data) so the old Service Worker is dropped
 
 Workflow: https://github.com/yknighth-star/h5-ebook-reader/actions
 

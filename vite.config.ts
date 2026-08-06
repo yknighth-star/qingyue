@@ -8,7 +8,7 @@ import path from 'node:path'
 // GitHub Pages project site: https://yknighth-star.github.io/h5-ebook-reader/
 const base = process.env.GITHUB_PAGES === 'true' ? '/h5-ebook-reader/' : '/'
 
-/** Copy PDF.js worker into public/ (dev) and dist/ (build) + ensure .nojekyll for GitHub Pages. */
+/** Copy PDF.js worker + .nojekyll after all other plugins write dist. */
 function pdfWorkerAndPagesPlugin(): Plugin {
   const workerSrc = path.resolve('node_modules/pdfjs-dist/build/pdf.worker.min.mjs')
 
@@ -20,6 +20,7 @@ function pdfWorkerAndPagesPlugin(): Plugin {
 
   return {
     name: 'pdf-worker-and-pages',
+    enforce: 'post',
     buildStart() {
       copyWorker(path.resolve('public'))
     },
@@ -58,7 +59,8 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Include .mjs so PDF worker is cached; denylist so SPA fallback won't return HTML for it
+        cacheId: 'h5-ebook-reader-v3',
+        cleanupOutdatedCaches: true,
         globPatterns: ['**/*.{js,mjs,css,html,ico,png,svg,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         navigateFallback: 'index.html',
@@ -79,7 +81,6 @@ export default defineConfig({
     format: 'es',
   },
   build: {
-    // Keep worker as a separate file with predictable handling
     assetsInlineLimit: 0,
   },
 })
