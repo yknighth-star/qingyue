@@ -3,7 +3,11 @@ import vue from '@vitejs/plugin-vue'
 import { VitePWA } from 'vite-plugin-pwa'
 import { fileURLToPath, URL } from 'node:url'
 
+// GitHub Pages project site: https://yknighth-star.github.io/h5-ebook-reader/
+const base = process.env.GITHUB_PAGES === 'true' ? '/h5-ebook-reader/' : '/'
+
 export default defineConfig({
+  base,
   plugins: [
     vue(),
     VitePWA({
@@ -16,7 +20,8 @@ export default defineConfig({
         theme_color: '#1a1f2e',
         background_color: '#1a1f2e',
         display: 'standalone',
-        start_url: '/',
+        start_url: base,
+        scope: base,
         icons: [
           {
             src: 'favicon.svg',
@@ -29,6 +34,7 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        navigateFallback: 'index.html',
       },
     }),
   ],

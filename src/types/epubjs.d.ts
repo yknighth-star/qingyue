@@ -11,6 +11,7 @@ declare module 'epubjs' {
     opened: Promise<Book>
     spine: unknown
     navigation?: { toc: NavItem[] }
+    load(url: string): Promise<Document>
     destroy(): void
     renderTo(
       element: HTMLElement,
