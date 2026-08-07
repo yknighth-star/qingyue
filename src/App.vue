@@ -10,9 +10,13 @@ const stats = useStatsStore()
 const books = useBooksStore()
 
 onMounted(async () => {
-  await settings.load()
-  await stats.load()
-  await books.refresh()
+  try {
+    await settings.load()
+    await stats.load()
+    await books.refresh()
+  } catch (err) {
+    console.warn('App boot failed', err)
+  }
 })
 </script>
 

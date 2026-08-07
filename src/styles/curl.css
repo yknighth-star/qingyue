@@ -1,4 +1,4 @@
-/* 仿真翻页：对齐微信读书/掌阅等 —— 书脊铰链翻折 + 折痕阴影（非卷轴） */
+/* 仿真 / 横滑：对齐微信读书·华为阅读 —— 分页动效挂在引擎根节点 */
 .epub-reader,
 .txt-reader,
 .pdf-reader {
@@ -8,20 +8,134 @@
   backface-visibility: hidden;
 }
 
+/* —— 横滑：双层内容滑动（ghost + live） —— */
+.page-slide-ghost {
+  pointer-events: none;
+  box-sizing: border-box;
+  contain: paint;
+}
+
+.page-slide-iframe-snap {
+  pointer-events: none;
+}
+
+.slide-hold {
+  opacity: 0 !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.slide-out-next,
+.slide-out-prev,
+.slide-in-next,
+.slide-in-prev {
+  pointer-events: none;
+}
+
+.slide-out-next {
+  animation: pageSlideOutNext 0.24s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.slide-out-prev {
+  animation: pageSlideOutPrev 0.24s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.slide-in-next {
+  animation: pageSlideInNext 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.slide-in-prev {
+  animation: pageSlideInPrev 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+@keyframes pageSlideOutNext {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-28%);
+    opacity: 0;
+  }
+}
+
+@keyframes pageSlideOutPrev {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(28%);
+    opacity: 0;
+  }
+}
+
+@keyframes pageSlideInNext {
+  from {
+    transform: translateX(36%);
+    opacity: 0.35;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes pageSlideInPrev {
+  from {
+    transform: translateX(-36%);
+    opacity: 0.35;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* 仿真跟手预览（松手后走完整 curl 动画） */
+.reader-stage.curl-drag .engine-host > * {
+  transform-origin: left center;
+  transition: none;
+  will-change: transform;
+}
+
+.reader-stage.curl-drag-next .engine-host > * {
+  transform: perspective(2200px) rotateY(calc(var(--curl-drag, 0) * -72deg));
+  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.2));
+  box-shadow: calc(var(--curl-drag, 0) * -20px) 0 32px rgba(0, 0, 0, 0.22);
+}
+
+.reader-stage.curl-drag-prev .engine-host > * {
+  transform-origin: right center;
+  transform: perspective(2200px) rotateY(calc(var(--curl-drag, 0) * 72deg));
+  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.2));
+  box-shadow: calc(var(--curl-drag, 0) * 20px) 0 32px rgba(0, 0, 0, 0.22);
+}
+
 .curl-hold {
   opacity: 0 !important;
   visibility: hidden;
   pointer-events: none;
 }
 
+.page-curl-ghost {
+  pointer-events: none;
+  box-sizing: border-box;
+  contain: paint;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+}
+
 .curl-out-next,
 .curl-out-prev,
 .curl-in-next,
-.curl-in-prev {
+.curl-in-prev,
+.curl-under-next,
+.curl-under-prev {
   pointer-events: none;
 }
 
-/* 折痕光影 */
+/* 折痕光影（幽灵翻出层） */
 .curl-out-next::after,
 .curl-out-prev::after,
 .curl-in-next::after,
@@ -84,6 +198,7 @@
 /*
  * 下一页：右手揭页，绕左侧书脊翻向左边（读者视角从右向左翻）
  * 上一页：左手揭页，绕右侧翻回（从左向右）
+ * 双层：幽灵层 curl-out；底层新页 curl-under（始终可见）
  */
 .curl-out-next {
   transform-origin: left center;
@@ -103,6 +218,16 @@
 .curl-in-prev {
   transform-origin: right center;
   animation: simInPrev 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-under-next {
+  transform-origin: left center;
+  animation: simUnderNext 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-under-prev {
+  transform-origin: right center;
+  animation: simUnderPrev 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
 }
 
 @keyframes simOutNext {
@@ -147,7 +272,30 @@
   }
 }
 
-/* 新页从下层显露后轻微落定（竞品常见：翻过即见底页，再短促收束） */
+/* 双层底层：新页内容始终可读，仅轻微落定 */
+@keyframes simUnderNext {
+  0% {
+    transform: perspective(2200px) translateX(6%) rotateY(-5deg);
+    filter: brightness(0.94);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+@keyframes simUnderPrev {
+  0% {
+    transform: perspective(2200px) translateX(-6%) rotateY(5deg);
+    filter: brightness(0.94);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+/* 旧单层入场（遗留） */
 @keyframes simInNext {
   0% {
     transform: perspective(2200px) translateX(10%) rotateY(-6deg);
@@ -178,15 +326,35 @@
   }
 }
 
+/* 上下滑动：取消左右翻页热区 */
 .reader-page[data-turn='scroll'] .edge-zone {
-  width: 6%;
-  opacity: 0.35;
+  display: none;
 }
 
-.reader-page[data-turn='curl'] .reader-stage {
+.reader-page[data-turn='curl'] .reader-stage,
+.reader-page[data-turn='slide'] .reader-stage {
   perspective: 2200px;
   overflow: hidden;
   background: var(--reader-bg, #f3ead3);
+}
+
+/* 横滑 / 仿真：PDF 锁定为整页，禁止自由纵滑 */
+.pdf-pages[data-turn='slide'],
+.pdf-pages[data-turn='curl'] {
+  overflow-y: hidden !important;
+  scroll-behavior: auto !important;
+}
+
+.txt-content[data-turn='slide'],
+.txt-content[data-turn='curl'] {
+  overflow-y: hidden !important;
+  scroll-behavior: auto !important;
+}
+
+.txt-content[data-turn='scroll'],
+.pdf-pages[data-turn='scroll'] {
+  overflow-y: auto !important;
+  scroll-behavior: smooth;
 }
 
 .seg-hint {

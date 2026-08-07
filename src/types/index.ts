@@ -8,6 +8,8 @@ export type AnnotType = 'highlight' | 'note' | 'bookmark'
 export type ThemeMode = 'light' | 'dark' | 'sepia' | 'green'
 export type PageTurnMode = 'scroll' | 'slide' | 'curl'
 export type DeviceClass = 'phone' | 'tablet' | 'desktop'
+/** 外观策略：手动选色 / 跟随系统 / 定时深色 */
+export type AppearanceMode = 'manual' | 'system' | 'schedule'
 
 export interface BookRecord {
   id: string
@@ -93,8 +95,11 @@ export interface ReaderSettings {
   ttsPitch: number
   /** speechSynthesis voiceURI; empty = auto-pick best Chinese voice */
   ttsVoiceURI: string
-  autoDark: boolean
+  /** 外观：手动 / 跟随系统 / 定时深色 */
+  appearanceMode: AppearanceMode
+  /** 定时深色开始小时 0–23（含） */
   autoDarkStart: number
+  /** 定时深色结束小时 0–23（不含）；可跨午夜 */
   autoDarkEnd: number
 }
 
@@ -183,7 +188,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   ttsRate: 1,
   ttsPitch: 1,
   ttsVoiceURI: '',
-  autoDark: false,
+  appearanceMode: 'manual',
   autoDarkStart: 21,
   autoDarkEnd: 7,
 }

@@ -34,11 +34,16 @@ const pageRef = ref<HTMLElement | null>(null)
 const isFinePointer = ref(false)
 const statusMsg = ref('')
 let statusTimer: number | null = null
+/** Bumps so schedule/system appearance recomputes without settings change */
+const themeTick = ref(0)
+const viewportWide = ref(typeof window !== 'undefined' ? window.innerWidth >= 1100 : true)
+let themeTickTimer: number | null = null
+let systemColorMql: MediaQueryList | null = null
 
 const pageTurnHint: Record<string, string> = {
-  slide: '整页切换，滚轮/点按翻页更干脆',
-  scroll: '连续滚动阅读，滚轮自由滑动',
-  curl: '仿真翻页：模拟纸书，下一页从右向左翻，上一页从左向右翻',
+  slide: '横滑：整页左右切换，支持左右滑、点两侧、滚轮翻页',
+  scroll: '上下滑动：连续纵滑阅读，不整页跳转',
+  curl: '仿真：模拟纸书卷曲，左右拖或点两侧翻页',
 }
 
 function flashStatus(msg: string) {
@@ -51,7 +56,18 @@ function flashStatus(msg: string) {
 
 const settings = computed(() => settingsStore.settings)
 const desktopUi = computed(() => isFinePointer.value || detectDevice() === 'desktop')
-const themeMode = computed(() => effectiveTheme(settings.value))
+const themeMode = computed(() => {
+  void themeTick.value
+  return effectiveTheme(settings.value)
+})
+
+function bumpThemeTick() {
+  themeTick.value += 1
+}
+
+function onSystemColorScheme() {
+  if (settingsStore.settings.appearanceMode === 'system') bumpThemeTick()
+}
 
 const {
   chromeVisible,
@@ -81,6 +97,7 @@ const {
   open: openSession,
   destroy: destroySession,
   flushProgress,
+  enableProgressSave,
   applySettings,
 } = useReaderSession({
   bookId: props.id,
@@ -168,6 +185,10 @@ const {
   onEdgeTurn,
   onStageClick,
   onContentTap,
+  onStagePointerDown,
+  onStagePointerMove,
+  onStagePointerUp,
+  onStagePointerCancel,
 } = useReaderGestures({
   engine,
   book,
@@ -184,8 +205,29 @@ const {
 })
 
 wheelHandler.fn = onEngineWheel
-tapHandler.fn = onContentTap
+tapHandler.fn = (ev: ContentTapEvent) => {
+  const s = settings.value
+  if (
+    book.value?.format === 'txt' &&
+    s.pageTurn === 'scroll' &&
+    s.autoScrollSpeed > 0 &&
+    !ev.isLink &&
+    !ev.hasSelection
+  ) {
+    const paused = engine.value?.toggleAutoScrollPause?.()
+    if (paused === 'paused' || paused === 'running') {
+      flashStatus(paused === 'paused' ? '已暂停自动滚屏' : '继续自动滚屏')
+      return
+    }
+  }
+  onContentTap(ev)
+}
 selectionHandler.fn = onEngineSelection
+
+function onStagePointerUpCombined(e: PointerEvent) {
+  onStagePointerUp(e)
+  onPointerUp()
+}
 
 function syncPageTheme() {
   const el = pageRef.value
@@ -194,16 +236,56 @@ function syncPageTheme() {
   Object.entries(vars).forEach(([k, v]) => el.style.setProperty(k, v))
 }
 
-watch(themeMode, () => syncPageTheme())
+watch(themeMode, () => {
+  syncPageTheme()
+  applySettings()
+})
+
+watch(chromeVisible, async () => {
+  await nextTick()
+  // Stage flex size changes after chrome v-show; EPUB must re-paginate.
+  requestAnimationFrame(() => engine.value?.resizeToContainer?.())
+})
 
 watch(
   () => settingsStore.settings.pageTurn,
   (mode, prev) => {
     if (prev && mode !== prev) {
       flashStatus(
-        mode === 'scroll' ? '已切换：滚动模式' : mode === 'curl' ? '已切换：仿真翻页' : '已切换：平移翻页',
+        mode === 'scroll'
+          ? '已切换：上下滑动'
+          : mode === 'curl'
+            ? '已切换：仿真'
+            : '已切换：横滑',
       )
     }
+  },
+)
+
+watch(
+  () => settingsStore.settings.dualColumn,
+  (on, prev) => {
+    if (prev === undefined || on === prev) return
+    if (settingsStore.settings.pageTurn === 'scroll') {
+      flashStatus(on ? '双栏将在横滑 / 仿真下生效' : '已关闭双栏')
+      return
+    }
+    if (on && !viewportWide.value) {
+      flashStatus('双栏需屏幕宽度 ≥ 1100px')
+      return
+    }
+    flashStatus(on ? '已开启双栏' : '已关闭双栏')
+  },
+)
+
+watch(
+  () => settingsStore.settings.appearanceMode,
+  (mode, prev) => {
+    if (!prev || mode === prev) return
+    flashStatus(
+      mode === 'system' ? '外观：跟随系统' : mode === 'schedule' ? '外观：定时深色' : '外观：手动',
+    )
+    bumpThemeTick()
   },
 )
 
@@ -275,6 +357,13 @@ function onKey(e: KeyboardEvent) {
 
 function refreshPointerMode() {
   isFinePointer.value = window.matchMedia('(pointer: fine)').matches
+  const wide = window.innerWidth >= 1100
+  if (wide !== viewportWide.value) {
+    viewportWide.value = wide
+    applySettings()
+  } else {
+    viewportWide.value = wide
+  }
 }
 
 function clearUiSelection() {
@@ -291,8 +380,8 @@ function back() {
 async function confirmDeleteBook() {
   if (!book.value) return
   const ok = await confirmDialog({
-    title: '删除此文件',
-    message: `确定删除「${book.value.title}」？\n将返回列表，阅读进度与笔记也会删除。`,
+    title: '删除这本书',
+    message: `确定删除「${book.value.title}」？\n将返回书架，阅读进度与笔记也会删除。`,
     confirmText: '删除',
     danger: true,
   })
@@ -308,6 +397,8 @@ async function boot() {
   await loadAnnotations(b.id)
   const saved = await books.getProgress(b.id)
   if (saved?.locator) await eng.goTo(saved.locator)
+  enableProgressSave()
+  flushProgress()
   window.setTimeout(() => {
     toc.value = eng.getToc()
   }, 400)
@@ -317,6 +408,9 @@ async function boot() {
 onMounted(async () => {
   refreshPointerMode()
   window.addEventListener('resize', refreshPointerMode)
+  systemColorMql = window.matchMedia('(prefers-color-scheme: dark)')
+  systemColorMql.addEventListener('change', onSystemColorScheme)
+  themeTickTimer = window.setInterval(bumpThemeTick, 60_000)
   mountVoices()
   await nextTick()
   syncPageTheme()
@@ -329,6 +423,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('resize', refreshPointerMode)
+  systemColorMql?.removeEventListener('change', onSystemColorScheme)
+  systemColorMql = null
+  if (themeTickTimer) window.clearInterval(themeTickTimer)
+  themeTickTimer = null
   stageRef.value?.removeEventListener('wheel', onStageWheel)
   unmountVoices()
   destroySession()
@@ -380,7 +478,15 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div ref="stageRef" class="reader-stage" @pointerup="onPointerUp" @click="onStageClick">
+    <div
+      ref="stageRef"
+      class="reader-stage"
+      @pointerdown="onStagePointerDown"
+      @pointermove="onStagePointerMove"
+      @pointerup="onStagePointerUpCombined"
+      @pointercancel="onStagePointerCancel"
+      @click="onStageClick"
+    >
       <div ref="host" class="engine-host" />
       <div class="edge-zone left" title="上一页" @click.stop="onEdgeTurn('prev')" />
       <div class="edge-zone right" title="下一页" @click.stop="onEdgeTurn('next')" />
@@ -406,7 +512,9 @@ onBeforeUnmount(() => {
     />
 
     <footer v-show="chromeVisible" class="reader-chrome bottom" @mousedown="clearUiSelection">
-      <button class="btn ghost" @click="engine?.prev()">上一页</button>
+      <button class="btn ghost" @click="engine?.prev()">
+        {{ settings.pageTurn === 'scroll' ? '上翻' : '上一页' }}
+      </button>
       <div class="chrome-progress">
         <div
           class="progress-bar seekable"
@@ -457,7 +565,9 @@ onBeforeUnmount(() => {
           ▾
         </button>
       </div>
-      <button class="btn ghost" @click="engine?.next()">下一页</button>
+      <button class="btn ghost" @click="engine?.next()">
+        {{ settings.pageTurn === 'scroll' ? '下翻' : '下一页' }}
+      </button>
     </footer>
 
     <div
@@ -505,6 +615,8 @@ onBeforeUnmount(() => {
       :settings="settings"
       :format="book?.format"
       :page-turn-hint="pageTurnHint"
+      :theme-tick="themeTick"
+      :viewport-wide="viewportWide"
       @close="closePanel"
       @update="settingsStore.update"
     />

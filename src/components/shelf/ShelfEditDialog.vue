@@ -17,15 +17,16 @@ const emit = defineEmits<{
 <template>
   <div class="modal-backdrop" @click.self="emit('cancel')">
     <div class="modal">
-      <h3>编辑文件信息</h3>
+      <h3>编辑信息</h3>
       <div class="field">
         <label>标题</label>
         <input :value="title" @input="emit('update:title', ($event.target as HTMLInputElement).value)" />
       </div>
       <div class="field">
-        <label>作者</label>
+        <label>作者（可选）</label>
         <input
           :value="author"
+          placeholder="佚名"
           @input="emit('update:author', ($event.target as HTMLInputElement).value)"
         />
       </div>

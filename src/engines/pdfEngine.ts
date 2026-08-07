@@ -87,10 +87,25 @@ export class PdfEngine implements ReaderEngine {
     this.selectionBridge.bind(pages)
     suppressHostCaret(pages)
     this.observeResize(pages)
+    this.applyPageTurnChrome()
 
     await this.renderVisible(true)
+    this.scrollToPage(this.page)
     this.emitProgress()
     void this.loadOutline()
+  }
+
+  private applyPageTurnChrome() {
+    if (!this.pagesEl) return
+    this.pagesEl.dataset.turn = this.pageTurn
+    if (this.pageTurn === 'scroll') {
+      this.pagesEl.style.overflowY = 'auto'
+      this.pagesEl.style.scrollBehavior = 'smooth'
+    } else {
+      // 横滑 / 仿真：整页锁定，不自由纵滑
+      this.pagesEl.style.overflowY = 'hidden'
+      this.pagesEl.style.scrollBehavior = 'auto'
+    }
   }
 
   private async loadOutline() {
@@ -129,6 +144,7 @@ export class PdfEngine implements ReaderEngine {
   applySettings(settings: ReaderSettings) {
     const prevZoom = this.userZoom
     const prevQuality = this.pdfQuality
+    const prevTurn = this.pageTurn
     this.settings = settings
     this.pageTurn = settings.pageTurn
     this.userZoom = clampPdfZoom(settings.pdfZoom ?? 1)
@@ -136,12 +152,16 @@ export class PdfEngine implements ReaderEngine {
     if (this.container) {
       applyThemeVars(this.container, effectiveTheme(settings), settings)
     }
-    if (this.pagesEl) {
-      this.pagesEl.dataset.turn = settings.pageTurn
-      this.pagesEl.style.scrollBehavior = settings.pageTurn === 'slide' ? 'auto' : 'smooth'
-    }
-    if (Math.abs(prevZoom - this.userZoom) > 0.001 || prevQuality !== this.pdfQuality) {
-      void this.renderVisible(true)
+    this.applyPageTurnChrome()
+    const zoomChanged = Math.abs(prevZoom - this.userZoom) > 0.001
+    const qualityChanged = prevQuality !== this.pdfQuality
+    const turnChanged = prevTurn !== this.pageTurn
+    if (zoomChanged || qualityChanged || turnChanged) {
+      void this.renderVisible(true).then(() => {
+        if (this.pageTurn !== 'scroll') this.scrollToPage(this.page)
+      })
+    } else if (this.pageTurn !== 'scroll') {
+      this.scrollToPage(this.page)
     }
   }
 
@@ -157,12 +177,18 @@ export class PdfEngine implements ReaderEngine {
 
   getProgress() {
     const total = this.pdf?.numPages || 1
-    const yRatio = this.pagesEl
-      ? this.pagesEl.scrollTop / Math.max(1, this.pagesEl.scrollHeight - this.pagesEl.clientHeight)
-      : 0
+    if (this.pageTurn === 'scroll' && this.pagesEl) {
+      const yRatio =
+        this.pagesEl.scrollTop /
+        Math.max(1, this.pagesEl.scrollHeight - this.pagesEl.clientHeight)
+      return {
+        locator: { type: 'pdf' as const, page: this.page, yRatio },
+        percent: yRatio * 100,
+      }
+    }
     return {
-      locator: { type: 'pdf' as const, page: this.page, yRatio },
-      percent: ((this.page - 1 + yRatio) / total) * 100,
+      locator: { type: 'pdf' as const, page: this.page, yRatio: 0 },
+      percent: total <= 1 ? 0 : ((this.page - 1) / (total - 1)) * 100,
     }
   }
 
@@ -209,15 +235,14 @@ export class PdfEngine implements ReaderEngine {
   async next() {
     if (!this.pdf) return
     const pdf = this.pdf
-    const turn = async () => {
-      if (this.pageTurn === 'scroll' && this.pagesEl) {
-        const el = this.pagesEl
-        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8
-        if (!atBottom) {
-          el.scrollBy({ top: el.clientHeight * 0.85, behavior: 'smooth' })
-          this.emitProgress()
-          return
-        }
+    // 上下滑动：按钮/程序调用 = 滚一屏；横滑/仿真 = 整页切换
+    if (this.pageTurn === 'scroll' && this.pagesEl) {
+      const el = this.pagesEl
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8
+      if (!atBottom) {
+        el.scrollBy({ top: el.clientHeight * 0.9, behavior: 'smooth' })
+        this.emitProgress()
+        return
       }
       if (this.page < pdf.numPages) {
         this.page++
@@ -225,14 +250,22 @@ export class PdfEngine implements ReaderEngine {
         this.scrollToPage(this.page)
         this.emitProgress()
       }
+      return
     }
-    await this.curl.run(this.pageTurn, this.container, 'next', turn)
+    if (this.page >= pdf.numPages) return
+    await this.curl.run(this.pageTurn, this.container, 'next', async () => {
+      this.page++
+      await this.renderVisible(false)
+      this.scrollToPage(this.page)
+      this.emitProgress()
+    })
   }
 
   async prev() {
-    const turn = async () => {
-      if (this.pageTurn === 'scroll' && this.pagesEl && this.pagesEl.scrollTop > 8) {
-        this.pagesEl.scrollBy({ top: -this.pagesEl.clientHeight * 0.85, behavior: 'smooth' })
+    if (!this.pdf) return
+    if (this.pageTurn === 'scroll' && this.pagesEl) {
+      if (this.pagesEl.scrollTop > 8) {
+        this.pagesEl.scrollBy({ top: -this.pagesEl.clientHeight * 0.9, behavior: 'smooth' })
         this.emitProgress()
         return
       }
@@ -242,8 +275,15 @@ export class PdfEngine implements ReaderEngine {
         this.scrollToPage(this.page)
         this.emitProgress()
       }
+      return
     }
-    await this.curl.run(this.pageTurn, this.container, 'prev', turn)
+    if (this.page <= 1) return
+    await this.curl.run(this.pageTurn, this.container, 'prev', async () => {
+      this.page--
+      await this.renderVisible(false)
+      this.scrollToPage(this.page)
+      this.emitProgress()
+    })
   }
 
   async search(query: string, opts?: SearchOptions): Promise<SearchHit[]> {
@@ -390,20 +430,29 @@ export class PdfEngine implements ReaderEngine {
     this.resizeObserver.observe(el)
   }
 
-  private getRenderMetrics(pageWidthAtScale1: number) {
+  private getRenderMetrics(pageWidthAtScale1: number, pageHeightAtScale1: number) {
     const padding = 24
     const containerWidth = Math.max(
       200,
       (this.pagesEl?.clientWidth || this.container?.clientWidth || 800) - padding,
     )
-    const fitScale = (containerWidth / Math.max(1, pageWidthAtScale1)) * this.userZoom
+    const containerHeight = Math.max(
+      200,
+      (this.pagesEl?.clientHeight || this.container?.clientHeight || 600) - padding,
+    )
+    let fitScale = (containerWidth / Math.max(1, pageWidthAtScale1)) * this.userZoom
+    // 横滑 / 仿真：整页落入视口，一文件页 = 一屏
+    if (this.pageTurn !== 'scroll') {
+      const heightScale = (containerHeight / Math.max(1, pageHeightAtScale1)) * this.userZoom
+      fitScale = Math.min(fitScale, heightScale)
+    }
     const native = Math.max(window.devicePixelRatio || 1, 1)
     const dpr = Math.min(native, maxDprForQuality(this.pdfQuality))
-    return { fitScale: Math.max(0.4, fitScale), dpr }
+    return { fitScale: Math.max(0.35, fitScale), dpr }
   }
 
   private renderKey(fitScale: number, dpr: number) {
-    return `${fitScale.toFixed(3)}_${dpr.toFixed(2)}_${this.userZoom}_${this.pdfQuality}`
+    return `${fitScale.toFixed(3)}_${dpr.toFixed(2)}_${this.userZoom}_${this.pdfQuality}_${this.pageTurn}`
   }
 
   private prefetchRange() {
@@ -555,7 +604,7 @@ export class PdfEngine implements ReaderEngine {
 
     const page = await this.pdf.getPage(pageNum)
     const base = page.getViewport({ scale: 1 })
-    const { fitScale, dpr } = this.getRenderMetrics(base.width)
+    const { fitScale, dpr } = this.getRenderMetrics(base.width, base.height)
     const viewport = page.getViewport({ scale: fitScale })
 
     wrap.innerHTML = ''
@@ -659,7 +708,7 @@ export class PdfEngine implements ReaderEngine {
     try {
       const probe = await this.pdf.getPage(this.page)
       const base = probe.getViewport({ scale: 1 })
-      const { fitScale, dpr } = this.getRenderMetrics(base.width)
+      const { fitScale, dpr } = this.getRenderMetrics(base.width, base.height)
       const key = this.renderKey(fitScale, dpr)
       if (force || key !== this.lastRenderKey) {
         this.lastRenderKey = key
@@ -735,17 +784,14 @@ export class PdfEngine implements ReaderEngine {
   private onWheelEvent = (e: WheelEvent) => {
     const el = this.pagesEl
     if (!el) return
-    if (this.settings?.pageTurn === 'scroll') {
-      this.wheelCb?.(e.deltaY)
+    if (this.pageTurn === 'scroll') {
+      // 连续纵滑：不拦截，浏览器原生滚动
       return
     }
-    const atTop = el.scrollTop <= 0
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2
-    if ((e.deltaY > 0 && atBottom) || (e.deltaY < 0 && atTop) || el.scrollHeight <= el.clientHeight + 2) {
-      e.preventDefault()
-      e.stopPropagation()
-      this.wheelCb?.(e.deltaY)
-    }
+    // 横滑 / 仿真：滚轮 = 整页
+    e.preventDefault()
+    e.stopPropagation()
+    this.wheelCb?.(e.deltaY)
   }
 
   private emitProgress() {

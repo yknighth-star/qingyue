@@ -1,6 +1,6 @@
 import ePub, { type Book, type NavItem, type Rendition } from 'epubjs'
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
-import { applyThemeVars, effectiveTheme } from '@/utils/format'
+import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH } from '@/utils/format'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
 import { indexOfIgnoreCase } from '@/utils/searchText'
@@ -38,14 +38,18 @@ export class EpubEngine implements ReaderEngine {
   private appliedHighlightCfis: string[] = []
   private readonly curl = createCurlGate()
   private readonly searchHl = createSearchHighlightState()
+  private resizeObserver: ResizeObserver | null = null
+  private resizeTimer: number | null = null
+  private lastSize = { w: 0, h: 0 }
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
     this.container = container
-    this.settings = settings
+    this.settings = { ...settings }
     this.pageTurn = settings.pageTurn
     container.innerHTML = ''
     container.className = 'epub-reader'
+    container.dataset.turn = settings.pageTurn
     applyThemeVars(container, effectiveTheme(settings), settings)
 
     // Blob URLs lack an .epub extension, so epubjs mis-detects type and never finishes
@@ -64,7 +68,20 @@ export class EpubEngine implements ReaderEngine {
       flow: settings.pageTurn === 'scroll' ? 'scrolled-doc' : 'paginated',
       // epub.js default overflow "auto" enables BOTH axes; force scroll+vertical so x stays hidden
       overflow: settings.pageTurn === 'scroll' ? 'scroll' : 'hidden',
-      spread: settings.dualColumn && window.innerWidth >= 1100 ? 'always' : 'none',
+      spread:
+        settings.dualColumn &&
+        settings.pageTurn !== 'scroll' &&
+        window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
+          ? 'always'
+          : 'none',
+      // Dual spread: modest gap for spine breathing room.
+      // Large gap + wrong scroll delta causes bleed — keep this small and tied to dual only.
+      gap:
+        settings.dualColumn &&
+        settings.pageTurn !== 'scroll' &&
+        window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
+          ? 40
+          : 0,
       // EPUB chapters often include scripts (TOC links, footnotes). Without this,
       // Chromium blocks them in about:srcdoc sandboxed iframes.
       allowScriptedContent: true,
@@ -79,13 +96,110 @@ export class EpubEngine implements ReaderEngine {
 
     await this.rendition.display()
     this.lockEpubHorizontalOverflow()
+    this.syncDualColumnAttr(
+      settings.dualColumn &&
+        settings.pageTurn !== 'scroll' &&
+        window.innerWidth >= DUAL_COLUMN_MIN_WIDTH,
+    )
+    {
+      const cs = getComputedStyle(container)
+      const pl = parseFloat(cs.paddingLeft) || 0
+      const pr = parseFloat(cs.paddingRight) || 0
+      const pt = parseFloat(cs.paddingTop) || 0
+      const pb = parseFloat(cs.paddingBottom) || 0
+      this.lastSize = {
+        w: Math.max(64, Math.round(container.clientWidth - pl - pr)),
+        h: Math.max(64, Math.round(container.clientHeight - pt - pb)),
+      }
+    }
+    this.observeResize(container)
 
     this.rendition.on('relocated', (...args: unknown[]) => {
       const loc = args[0] as { start: { cfi: string; index: number }; percentage?: number }
       this.spineIndex = loc.start?.index ?? 0
       this.progressCb?.(this.getProgressFromLoc(loc))
       this.lockEpubHorizontalOverflow()
+      if (this.settings) this.applyTypographyToAllContents(this.settings)
     })
+  }
+
+  /**
+   * Chrome show/hide changes stage size; epub.js must recompute columns / scroll delta
+   * or the next swipe lands between pages (edge bleed / content jumps).
+   */
+  private observeResize(el: HTMLElement) {
+    this.resizeObserver?.disconnect()
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
+      this.resizeTimer = window.setTimeout(() => this.handleResize(false), 160)
+    })
+    this.resizeObserver.observe(el)
+    const stage = el.parentElement
+    if (stage && stage !== el) this.resizeObserver.observe(stage)
+  }
+
+  /** Call after reader chrome toggle or other layout changes that resize the stage. */
+  resizeToContainer() {
+    this.handleResize(true)
+  }
+
+  private syncDualColumnAttr(on: boolean) {
+    if (!this.container) return
+    if (on) this.container.dataset.dual = '1'
+    else delete this.container.dataset.dual
+  }
+
+  private isDualSpread(settings: ReaderSettings) {
+    return (
+      settings.dualColumn &&
+      settings.pageTurn !== 'scroll' &&
+      window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
+    )
+  }
+
+  private handleResize(force: boolean) {
+    if (!this.rendition || !this.container) return
+    // Wait one frame so flex layout after v-show has settled
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => this.applyResize(force))
+    })
+  }
+
+  private applyResize(force: boolean) {
+    if (!this.rendition || !this.container) return
+    const cs = getComputedStyle(this.container)
+    const pl = parseFloat(cs.paddingLeft) || 0
+    const pr = parseFloat(cs.paddingRight) || 0
+    const pt = parseFloat(cs.paddingTop) || 0
+    const pb = parseFloat(cs.paddingBottom) || 0
+    // border-box: client* includes padding; epub.js needs the content-box size
+    const w = Math.max(64, Math.round(this.container.clientWidth - pl - pr))
+    const h = Math.max(64, Math.round(this.container.clientHeight - pt - pb))
+    if (!force && Math.abs(w - this.lastSize.w) < 2 && Math.abs(h - this.lastSize.h) < 2) return
+
+    this.lastSize = { w, h }
+
+    // epub.js manager.resize early-returns when _stageSize matches; chrome toggle can
+    // update the DOM container via height:100% without going through that path, leaving
+    // stale iframe/page metrics. Invalidate so resize always rebuilds views.
+    try {
+      const mgr = (this.rendition as unknown as { manager?: { _stageSize?: unknown } }).manager
+      if (mgr) mgr._stageSize = undefined
+    } catch {
+      /* */
+    }
+
+    try {
+      this.rendition.resize(w, h)
+    } catch (err) {
+      console.warn('epub resize failed', err)
+      return
+    }
+    // rendition.onResized already redisplays current CFI; re-lock + refresh spine inset
+    window.setTimeout(() => {
+      this.lockEpubHorizontalOverflow()
+      if (this.settings) this.applyTypographyToAllContents(this.settings)
+    }, 60)
   }
 
   /** Kill horizontal scrollbars that epub.js "overflow: auto" otherwise enables. */
@@ -101,12 +215,26 @@ export class EpubEngine implements ReaderEngine {
       container.style.maxWidth = '100%'
       container.style.boxSizing = 'border-box'
     }
-    root.querySelectorAll('.epub-view, .epub-view iframe').forEach((el) => {
-      if (!(el instanceof HTMLElement)) return
-      el.style.maxWidth = '100%'
-      el.style.boxSizing = 'border-box'
-      if (el.classList.contains('epub-view')) el.style.overflowX = 'hidden'
-    })
+    // Only clamp view/iframe width in continuous scroll mode.
+    // Paginated: epub.js expand() needs views wider than the viewport.
+    if (this.pageTurn === 'scroll') {
+      root.querySelectorAll('.epub-view, .epub-view iframe').forEach((el) => {
+        if (!(el instanceof HTMLElement)) return
+        el.style.maxWidth = '100%'
+        el.style.boxSizing = 'border-box'
+        if (el.classList.contains('epub-view')) el.style.overflowX = 'hidden'
+      })
+    } else {
+      root.querySelectorAll('.epub-view, .epub-view iframe').forEach((el) => {
+        if (!(el instanceof HTMLElement)) return
+        el.style.removeProperty('max-width')
+        if (el.style.width === '100%') el.style.removeProperty('width')
+        if (el.classList.contains('epub-view')) {
+          el.style.overflow = 'hidden'
+          el.style.removeProperty('overflow-x')
+        }
+      })
+    }
   }
 
   private emitSelectionNow(fallbackX?: number, fallbackY?: number) {
@@ -133,6 +261,7 @@ export class EpubEngine implements ReaderEngine {
 
     this.normalizeChapterTitles(doc)
     this.containOverflowMedia(doc)
+    if (this.settings) this.applyTypographyToDocument(doc, this.settings)
 
     // Re-apply search marks when chapter iframe mounts / remounts
     if (this.searchHl.get() && doc.body) {
@@ -194,6 +323,10 @@ export class EpubEngine implements ReaderEngine {
   destroy() {
     if (this.selectionDebounce) window.clearTimeout(this.selectionDebounce)
     this.selectionDebounce = null
+    if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
+    this.resizeTimer = null
+    this.resizeObserver?.disconnect()
+    this.resizeObserver = null
     try {
       this.rendition?.destroy()
     } catch {
@@ -215,10 +348,15 @@ export class EpubEngine implements ReaderEngine {
 
   applySettings(settings: ReaderSettings) {
     const prevTurn = this.pageTurn
-    this.settings = settings
+    const prev = this.settings
+    this.settings = { ...settings }
     this.pageTurn = settings.pageTurn
-    if (this.container) applyThemeVars(this.container, effectiveTheme(settings), settings)
+    if (this.container) {
+      this.container.dataset.turn = settings.pageTurn
+      applyThemeVars(this.container, effectiveTheme(settings), settings)
+    }
     this.applyThemeToRendition(settings)
+    this.applyTypographyToAllContents(settings)
     // pageTurn only applied at open() before — switch flow live when mode changes
     if (this.rendition && prevTurn !== settings.pageTurn) {
       const flow = settings.pageTurn === 'scroll' ? 'scrolled-doc' : 'paginated'
@@ -231,6 +369,86 @@ export class EpubEngine implements ReaderEngine {
         console.warn('epub flow switch failed', err)
       }
     }
+    // Dual-column spread: only paginated + wide screen
+    const wantSpread = this.isDualSpread(settings)
+    const prevWantSpread = !!prev && this.isDualSpread({ ...prev, pageTurn: prevTurn })
+    if (this.rendition && (wantSpread !== prevWantSpread || prevTurn !== settings.pageTurn)) {
+      void this.rebuildForSpread(wantSpread)
+    } else {
+      this.syncDualColumnAttr(wantSpread)
+    }
+    // Margins / font metrics change the content box — must re-paginate.
+    const typographyChanged =
+      !prev ||
+      prev.marginX !== settings.marginX ||
+      prev.marginY !== settings.marginY ||
+      prev.fontSize !== settings.fontSize ||
+      prev.lineHeight !== settings.lineHeight ||
+      prev.paragraphGap !== settings.paragraphGap ||
+      prev.indent !== settings.indent ||
+      prev.fontFamily !== settings.fontFamily ||
+      prevTurn !== settings.pageTurn
+    // Spread rebuild already resizes; avoid racing a second resize.
+    if (typographyChanged && wantSpread === prevWantSpread) {
+      this.resizeToContainer()
+    }
+  }
+
+  /**
+   * Hot-toggle dual spread: gap must live on manager.settings, and views must be
+   * cleared + redisplayed — updateLayout alone leaves stale columns until refresh.
+   */
+  private async rebuildForSpread(wantSpread: boolean) {
+    if (!this.rendition) return
+    const rendition = this.rendition as unknown as {
+      settings: { gap: number }
+      manager?: {
+        settings: { gap: number }
+        clear: () => void
+      }
+      spread: (s: string) => void
+      display: (target?: string | number) => Promise<unknown>
+      currentLocation: () => { start?: { cfi?: string } }
+    }
+    const gap = wantSpread ? 40 : 0
+    rendition.settings.gap = gap
+    if (rendition.manager?.settings) rendition.manager.settings.gap = gap
+
+    try {
+      rendition.spread(wantSpread ? 'always' : 'none')
+    } catch (err) {
+      console.warn('epub spread switch failed', err)
+    }
+    this.syncDualColumnAttr(wantSpread)
+
+    let cfi: string | undefined
+    try {
+      cfi = rendition.currentLocation()?.start?.cfi
+    } catch {
+      /* */
+    }
+
+    try {
+      rendition.manager?.clear?.()
+    } catch {
+      /* */
+    }
+
+    // Force resize path even if stage px unchanged
+    this.lastSize = { w: 0, h: 0 }
+    this.resizeToContainer()
+
+    try {
+      if (cfi) await rendition.display(cfi)
+      else await rendition.display()
+    } catch (err) {
+      console.warn('epub redisplay after spread failed', err)
+    }
+
+    window.setTimeout(() => {
+      this.lockEpubHorizontalOverflow()
+      if (this.settings) this.applyTypographyToAllContents(this.settings)
+    }, 100)
   }
 
   getToc() {
@@ -269,14 +487,39 @@ export class EpubEngine implements ReaderEngine {
 
   async next() {
     await this.curl.run(this.pageTurn, this.container, 'next', async () => {
-      await this.rendition?.next()
+      await this.turnPage('next')
     })
   }
 
   async prev() {
     await this.curl.run(this.pageTurn, this.container, 'prev', async () => {
-      await this.rendition?.prev()
+      await this.turnPage('prev')
     })
+  }
+
+  /** Advance/rewind and wait until epub.js finishes relocating (layout stable). */
+  private async turnPage(dir: 'next' | 'prev') {
+    if (!this.rendition) return
+    const rendition = this.rendition
+    const relocated = new Promise<void>((resolve) => {
+      const timer = window.setTimeout(() => {
+        rendition.off('relocated', onRelocated)
+        resolve()
+      }, 400)
+      const onRelocated = () => {
+        window.clearTimeout(timer)
+        rendition.off('relocated', onRelocated)
+        resolve()
+      }
+      rendition.on('relocated', onRelocated)
+    })
+    try {
+      if (dir === 'next') await rendition.next()
+      else await rendition.prev()
+    } catch {
+      /* at bound */
+    }
+    await relocated
   }
 
   async search(query: string): Promise<SearchHit[]> {
@@ -496,11 +739,135 @@ export class EpubEngine implements ReaderEngine {
     return null
   }
 
+  /** epub.js addStylesheetRules only appends; clear so typography updates replace cleanly. */
+  private clearInjectedThemeStyles() {
+    if (!this.rendition) return
+    try {
+      const contents = (
+        this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+      ).getContents?.()
+      contents?.forEach((c) => {
+        const doc = c.document
+        if (!doc) return
+        const el = doc.getElementById('epubjs-inserted-css-default')
+        if (!el) return
+        // Rules were inserted via CSSOM (not textContent) — remove node so next inject is fresh.
+        el.remove()
+      })
+    } catch {
+      /* */
+    }
+  }
+
+  /**
+   * Publisher CSS often sets font-* on `.class` with !important, which beats
+   * body/p theme rules (class specificity). Inject a dedicated stylesheet with
+   * html body …[class] selectors, plus inline fallback after layout settles.
+   */
+  private applyTypographyToDocument(doc: Document, settings: ReaderSettings) {
+    const body = doc.body
+    if (!body) return
+
+    const id = 'qingyue-typography'
+    let styleEl = doc.getElementById(id) as HTMLStyleElement | null
+    if (!styleEl) {
+      styleEl = doc.createElement('style')
+      styleEl.id = id
+      doc.head.appendChild(styleEl)
+    }
+    // Escape is unnecessary for numeric settings; font-family is from our presets.
+    // Do NOT add body horizontal padding in paginated/spread mode — it desyncs
+    // epub.js column width vs scroll delta and causes multi-column bleed.
+    const padCss =
+      settings.pageTurn === 'scroll'
+        ? ''
+        : `
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;`
+
+    styleEl.textContent = `
+html body {
+  font-size: ${settings.fontSize}px !important;
+  line-height: ${settings.lineHeight} !important;
+  font-family: ${settings.fontFamily} !important;${padCss}
+}
+html body p,
+html body div,
+html body li,
+html body td,
+html body th,
+html body blockquote,
+html body section,
+html body article,
+html body span,
+html body p[class],
+html body div[class],
+html body li[class],
+html body span[class],
+html body td[class],
+html body th[class],
+html body blockquote[class],
+html body section[class],
+html body article[class] {
+  font-size: inherit !important;
+  line-height: inherit !important;
+  font-family: inherit !important;
+}
+html body p,
+html body p[class] {
+  margin-top: 0 !important;
+  margin-bottom: ${settings.paragraphGap}em !important;
+  text-indent: ${settings.indent}em !important;
+}
+html body h1,
+html body h2,
+html body h3,
+html body h4,
+html body h5,
+html body h6 {
+  font-family: ${settings.fontFamily} !important;
+}
+`.trim()
+
+    body.style.setProperty('font-size', `${settings.fontSize}px`, 'important')
+    body.style.setProperty('line-height', String(settings.lineHeight), 'important')
+    body.style.setProperty('font-family', settings.fontFamily, 'important')
+    if (settings.pageTurn !== 'scroll') {
+      body.style.setProperty('padding-left', '0', 'important')
+      body.style.setProperty('padding-right', '0', 'important')
+      body.style.setProperty('padding-top', '0', 'important')
+      body.style.setProperty('padding-bottom', '0', 'important')
+    }
+  }
+
+  private applyTypographyToAllContents(settings: ReaderSettings) {
+    if (!this.rendition) return
+    try {
+      const contents = (
+        this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+      ).getContents?.()
+      contents?.forEach((c) => {
+        if (c.document) this.applyTypographyToDocument(c.document, settings)
+      })
+    } catch {
+      /* */
+    }
+  }
+
   private applyThemeToRendition(settings: ReaderSettings) {
     if (!this.rendition) return
+    this.clearInjectedThemeStyles()
     const theme = effectiveTheme(settings)
     const bg = theme === 'dark' ? '#12141a' : theme === 'green' ? '#c7e0c7' : theme === 'light' ? '#f7f7f5' : '#f3ead3'
     const fg = theme === 'dark' ? '#e8e6e3' : '#3b2f2f'
+    // Books often set font-* on p/div with !important — body alone is not enough.
+    const typeface = {
+      'font-size': `${settings.fontSize}px !important`,
+      'line-height': `${settings.lineHeight} !important`,
+      'font-family': `${settings.fontFamily} !important`,
+    }
     const titleReset = {
       'text-indent': '0 !important',
       'text-align': 'center !important',
@@ -528,10 +895,7 @@ export class EpubEngine implements ReaderEngine {
       body: {
         background: bg,
         color: fg,
-        'font-size': `${settings.fontSize}px !important`,
-        'line-height': `${settings.lineHeight} !important`,
-        'font-family': `${settings.fontFamily} !important`,
-        padding: `${settings.marginY}px ${settings.marginX}px !important`,
+        ...typeface,
         margin: '0 !important',
         cursor: 'default !important',
         'caret-color': 'transparent !important',
@@ -542,8 +906,23 @@ export class EpubEngine implements ReaderEngine {
         width: '100% !important',
         'box-sizing': 'border-box !important',
         'word-wrap': 'break-word !important',
-        'overflow-wrap': 'anywhere !important',
+        'overflow-wrap': 'break-word !important',
+        // Paginated: page margins live on .epub-reader padding (see engines.css).
+        // Dual spread: only spine-side inset is applied in applyTypographyToDocument.
+        ...(settings.pageTurn === 'scroll'
+          ? { padding: `${settings.marginY}px ${settings.marginX}px !important` }
+          : {
+              'padding-top': '0 !important',
+              'padding-bottom': '0 !important',
+              'padding-left': '0 !important',
+              'padding-right': '0 !important',
+            }),
       },
+      // Beat publisher p/div font rules (common in CN EPUBs)
+      'body p, body div, body li, body td, body th, body blockquote, body section, body article':
+        {
+          ...typeface,
+        },
       'img, svg, video, canvas': {
         'max-width': '100% !important',
         'height': 'auto !important',
@@ -564,7 +943,9 @@ export class EpubEngine implements ReaderEngine {
         'word-break': 'break-word !important',
         'overflow-x': 'hidden !important',
       },
-      p: {
+      'body p': {
+        ...typeface,
+        'margin-top': '0 !important',
         'margin-bottom': `${settings.paragraphGap}em !important`,
         'text-indent': `${settings.indent}em !important`,
         cursor: 'text !important',
@@ -572,8 +953,12 @@ export class EpubEngine implements ReaderEngine {
         'user-select': 'text !important',
         '-webkit-user-select': 'text !important',
       },
+      'body div, body li, body blockquote': {
+        'margin-bottom': `${Math.max(0, settings.paragraphGap * 0.5)}em !important`,
+      },
       'h1, h2, h3, h4, h5, h6': {
         ...titleReset,
+        'font-family': `${settings.fontFamily} !important`,
         'margin-top': '1.1em !important',
         'margin-bottom': '0.75em !important',
         'line-height': '1.35 !important',
@@ -581,7 +966,6 @@ export class EpubEngine implements ReaderEngine {
       h1: { 'font-size': '1.45em !important', ...titleReset },
       h2: { 'font-size': '1.28em !important', ...titleReset },
       h3: { 'font-size': '1.15em !important', ...titleReset },
-      // Broad title / section heading patterns used by Chinese EPUBs
       'p.title, p.titlepage, p.chapter, p.chapter-title, p.ctitle, p.center, .title, .chapter-title, .chapterTitle, .kindle-cn-title, .contents-title, [class*="title"], [class*="Title"], [class*="chapter-title"], [class*="Chapter"], [class*="CENTER"], [class*="center"]':
         {
           ...titleReset,
@@ -654,6 +1038,10 @@ export class EpubEngine implements ReaderEngine {
       node.removeAttribute('width')
       node.removeAttribute('height')
     })
+
+    // Do not force iframe/body width in paginated mode — that collapses epub.js multi-page expand.
+    if (this.pageTurn !== 'scroll') return
+
     const html = doc.documentElement
     const body = doc.body
     html?.style.setProperty('overflow-x', 'hidden', 'important')
@@ -664,7 +1052,6 @@ export class EpubEngine implements ReaderEngine {
     body?.style.setProperty('box-sizing', 'border-box', 'important')
     body?.style.setProperty('margin', '0', 'important')
 
-    // epub.js iframe/view can end a few px wider than the stage once a vertical scrollbar appears
     try {
       const iframe = doc.defaultView?.frameElement as HTMLIFrameElement | null
       if (iframe) {

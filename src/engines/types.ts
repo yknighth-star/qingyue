@@ -61,6 +61,11 @@ export interface ReaderEngine {
   open(blob: Blob, settings: ReaderSettings, container: HTMLElement): Promise<void>
   destroy(): void
   applySettings(settings: ReaderSettings): void
+  /** Recompute layout after the reading stage size changes (e.g. chrome show/hide). */
+  resizeToContainer?(): void
+  /** TXT auto-scroll: pause / resume without clearing speed setting. */
+  toggleAutoScrollPause?(): 'paused' | 'running' | null
+  isAutoScrollPaused?(): boolean
   getToc(): TocItem[]
   getProgress(): { locator: Locator; percent: number }
   goTo(locator: Locator): Promise<void> | void

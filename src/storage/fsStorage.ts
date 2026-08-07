@@ -4,7 +4,6 @@ import type { BookRecord } from '@/types'
 import {
   detectFormat,
   sampleHash,
-  titleFromFilename,
   uid,
   type ImportResult,
   type LibraryStorage,
@@ -12,18 +11,35 @@ import {
 import { idbStorage } from './idbStorage'
 import { extractCoverAndMeta } from './meta'
 import { tagsWithAutoFolder } from '@/utils/shelfTags'
+import { pickBookAuthor, pickBookTitle } from '@/utils/bookMeta'
 
 const ROOT_ID = 'default'
 
-async function ensurePermission(handle: FileSystemDirectoryHandle): Promise<boolean> {
+/**
+ * Check / optionally request FS access.
+ * `requestPermission` requires a user gesture — never use interactive on app mount.
+ */
+async function ensurePermission(
+  handle: FileSystemDirectoryHandle,
+  options?: { interactive?: boolean },
+): Promise<boolean> {
   const opts = { mode: 'read' as const }
-  if (handle.queryPermission) {
-    let state = await handle.queryPermission(opts)
-    if (state === 'granted') return true
-    if (handle.requestPermission) {
-      state = await handle.requestPermission(opts)
-      return state === 'granted'
+  const interactive = Boolean(options?.interactive)
+  try {
+    if (handle.queryPermission) {
+      const state = await handle.queryPermission(opts)
+      if (state === 'granted') return true
+      if (state === 'denied') return false
+      // "prompt" — only escalate when the caller is a user gesture
+      if (!interactive || !handle.requestPermission) return false
+      const next = await handle.requestPermission(opts)
+      return next === 'granted'
     }
+  } catch (err) {
+    // SecurityError when requestPermission runs without user activation
+    if (!interactive) return false
+    console.warn('FS permission failed', err)
+    return false
   }
   return true
 }
@@ -63,12 +79,22 @@ export interface FsRootInfo {
   name: string
 }
 
-export async function getLinkedRoot(): Promise<(FsRootInfo & { handle: FileSystemDirectoryHandle }) | null> {
+/** Linked folder metadata from IDB — safe on mount (no permission prompt). */
+export async function peekLinkedRoot(): Promise<(FsRootInfo & { handle: FileSystemDirectoryHandle }) | null> {
   const row = await db.fsRoots.get(ROOT_ID)
   if (!row) return null
-  const ok = await ensurePermission(row.handle)
-  if (!ok) return null
   return { id: row.id, name: row.name, handle: row.handle }
+}
+
+/** Resolve linked root with permission. Use interactive:true only from click/tap handlers. */
+export async function getLinkedRoot(options?: {
+  interactive?: boolean
+}): Promise<(FsRootInfo & { handle: FileSystemDirectoryHandle }) | null> {
+  const row = await peekLinkedRoot()
+  if (!row) return null
+  const ok = await ensurePermission(row.handle, options)
+  if (!ok) return null
+  return row
 }
 
 async function* walkFiles(
@@ -87,7 +113,8 @@ async function* walkFiles(
 }
 
 export async function scanLibraryFolder(): Promise<ImportResult[]> {
-  const root = await getLinkedRoot()
+  // User clicked 关联/同步 — may prompt for permission
+  const root = await getLinkedRoot({ interactive: true })
   if (!root) return []
   const results: ImportResult[] = []
   const existing = await db.books.toArray()
@@ -110,8 +137,8 @@ export async function scanLibraryFolder(): Promise<ImportResult[]> {
     const meta = await extractCoverAndMeta(file, format)
     const book: BookRecord = {
       id: uid('book'),
-      title: meta.title || titleFromFilename(path.split('/').pop() || path),
-      author: meta.author || '未知作者',
+      title: pickBookTitle(meta.title, path.split('/').pop() || path),
+      author: pickBookAuthor(meta.author),
       format,
       cover: meta.cover,
       fileSize: file.size,
@@ -132,7 +159,8 @@ export async function scanLibraryFolder(): Promise<ImportResult[]> {
 }
 
 async function resolveFsFile(fsPath: string): Promise<File | null> {
-  const root = await getLinkedRoot()
+  // Opening a book is a user gesture
+  const root = await getLinkedRoot({ interactive: true })
   if (!root) return null
   const parts = fsPath.split('/').filter(Boolean)
   let dir: FileSystemDirectoryHandle = root.handle

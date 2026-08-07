@@ -1,5 +1,5 @@
 import { db } from '@/db'
-import { DEFAULT_SETTINGS, FONT_PRESETS, type ReaderSettings } from '@/types'
+import { DEFAULT_SETTINGS, FONT_PRESETS, type AppearanceMode, type ReaderSettings } from '@/types'
 
 function normalizeFontFamily(fontFamily: string): string {
   if (FONT_PRESETS.some((f) => f.value === fontFamily)) return fontFamily
@@ -18,6 +18,12 @@ function normalizeFontFamily(fontFamily: string): string {
   return hit?.value ?? DEFAULT_SETTINGS.fontFamily
 }
 
+function normalizeAppearance(raw: ReaderSettings & { autoDark?: boolean }): AppearanceMode {
+  const mode = raw.appearanceMode
+  if (mode === 'manual' || mode === 'system' || mode === 'schedule') return mode
+  return raw.autoDark ? 'schedule' : 'manual'
+}
+
 export const settingsRepo = {
   async load(): Promise<ReaderSettings> {
     const row = await db.settings.get('reader')
@@ -25,13 +31,16 @@ export const settingsRepo = {
       await db.settings.put({ id: 'reader', ...DEFAULT_SETTINGS })
       return { ...DEFAULT_SETTINGS }
     }
-    const { id: _id, ...rest } = row as ReaderSettings & { id: string }
+    const { id: _id, ...rest } = row as ReaderSettings & { id: string; autoDark?: boolean }
     const merged = { ...DEFAULT_SETTINGS, ...rest }
     merged.fontFamily = normalizeFontFamily(merged.fontFamily)
+    merged.appearanceMode = normalizeAppearance(merged as ReaderSettings & { autoDark?: boolean })
+    delete (merged as { autoDark?: boolean }).autoDark
     return merged
   },
 
   async save(settings: ReaderSettings): Promise<void> {
-    await db.settings.put({ id: 'reader', ...settings })
+    const { autoDark: _legacy, ...clean } = settings as ReaderSettings & { autoDark?: boolean }
+    await db.settings.put({ id: 'reader', ...clean })
   },
 }

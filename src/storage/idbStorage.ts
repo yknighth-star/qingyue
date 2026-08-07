@@ -5,12 +5,12 @@ import type { BookRecord } from '@/types'
 import {
   detectFormat,
   sampleHash,
-  titleFromFilename,
   uid,
   type ImportResult,
   type LibraryStorage,
 } from './types'
 import { extractCoverAndMeta } from './meta'
+import { pickBookAuthor, pickBookTitle } from '@/utils/bookMeta'
 
 export const idbStorage: LibraryStorage = {
   kind: 'idb',
@@ -26,7 +26,7 @@ export const idbStorage: LibraryStorage = {
       if (!format) continue
       if (file.size > MAX_IDB_FILE_BYTES) {
         throw new Error(
-          `「${file.name}」超过 ${Math.round(MAX_IDB_FILE_BYTES / 1024 / 1024)}MB。请改用「关联文件夹」从磁盘读取大文件。`,
+          `「${file.name}」超过 ${Math.round(MAX_IDB_FILE_BYTES / 1024 / 1024)}MB。请改用「关联目录」从磁盘读取大书。`,
         )
       }
       const contentHash = await sampleHash(file)
@@ -39,8 +39,8 @@ export const idbStorage: LibraryStorage = {
       const meta = await extractCoverAndMeta(file, format)
       const book: BookRecord = {
         id: uid('book'),
-        title: meta.title || titleFromFilename(file.name),
-        author: meta.author || '未知作者',
+        title: pickBookTitle(meta.title, file.name),
+        author: pickBookAuthor(meta.author),
         format,
         cover: meta.cover,
         fileSize: file.size,

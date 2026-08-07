@@ -1,6 +1,6 @@
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
 import { decodeTextBlob, splitTxtChapters, type TxtChapter } from '@/utils/encoding'
-import { applyThemeVars, effectiveTheme } from '@/utils/format'
+import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH } from '@/utils/format'
 import { indexOfIgnoreCase } from '@/utils/searchText'
 import {
   FULL_ENGINE_CAPABILITIES,
@@ -28,6 +28,7 @@ export class TxtEngine implements ReaderEngine {
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
   private readonly curl = createCurlGate()
   private readonly searchHl = createSearchHighlightState()
+  private autoScrollPaused = false
   private selectionBridge = createHostSelectionBridge({
     getRoot: () => this.contentEl,
     capture: () => this.captureSelection(),
@@ -72,19 +73,101 @@ export class TxtEngine implements ReaderEngine {
   }
 
   applySettings(settings: ReaderSettings) {
-    this.settings = settings
+    const prev = this.settings
+    this.settings = { ...settings }
     this.pageTurn = settings.pageTurn
     if (!this.container) return
     applyThemeVars(this.container, effectiveTheme(settings), settings)
     if (this.contentEl) {
-      this.contentEl.style.columnCount = settings.dualColumn && window.innerWidth >= 1100 ? '2' : '1'
-      this.contentEl.style.columnGap = '2.5rem'
-      // scroll: free scrolling; slide/curl: still scrollable but paging snaps by viewport
+      applyThemeVars(this.contentEl, effectiveTheme(settings), settings)
+      const dual =
+        settings.dualColumn &&
+        settings.pageTurn !== 'scroll' &&
+        window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
+      const prevDual =
+        !!prev &&
+        prev.dualColumn &&
+        prev.pageTurn !== 'scroll' &&
+        window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
+      this.contentEl.style.columnCount = dual ? '2' : '1'
+      this.contentEl.style.columnGap = dual ? '3.75rem' : '2.5rem'
       this.contentEl.dataset.turn = settings.pageTurn
-      this.contentEl.style.scrollBehavior = settings.pageTurn === 'scroll' ? 'smooth' : 'auto'
+      if (dual) this.contentEl.dataset.dual = '1'
+      else delete this.contentEl.dataset.dual
+      if (this.container) {
+        if (dual) this.container.dataset.dual = '1'
+        else delete this.container.dataset.dual
+      }
+      if (settings.pageTurn === 'scroll') {
+        this.contentEl.style.overflowY = 'auto'
+        this.contentEl.style.scrollBehavior = 'smooth'
+      } else {
+        // 横滑 / 仿真：按屏分页，禁止自由纵滑
+        this.contentEl.style.overflowY = 'hidden'
+        this.contentEl.style.scrollBehavior = 'auto'
+        requestAnimationFrame(() => {
+          // Dual toggle must reflow columns before snap
+          if (dual !== prevDual) void this.contentEl?.offsetHeight
+          this.snapToNearestPage()
+        })
+      }
     }
-    if (settings.autoScrollSpeed > 0) this.startAutoScroll(settings.autoScrollSpeed)
-    else this.stopAutoScroll()
+    // 自动滚屏仅上下滑动模式
+    if (settings.pageTurn === 'scroll' && settings.autoScrollSpeed > 0) {
+      if (!prev || prev.autoScrollSpeed <= 0) this.autoScrollPaused = false
+      if (!this.autoScrollPaused) this.startAutoScroll(settings.autoScrollSpeed)
+      else this.stopAutoScroll()
+    } else {
+      this.stopAutoScroll()
+    }
+  }
+
+  /** @returns paused | running | null if auto-scroll not active */
+  toggleAutoScrollPause(): 'paused' | 'running' | null {
+    if (!this.settings || this.settings.pageTurn !== 'scroll' || this.settings.autoScrollSpeed <= 0) {
+      return null
+    }
+    this.autoScrollPaused = !this.autoScrollPaused
+    if (this.autoScrollPaused) this.stopAutoScroll()
+    else this.startAutoScroll(this.settings.autoScrollSpeed)
+    return this.autoScrollPaused ? 'paused' : 'running'
+  }
+
+  isAutoScrollPaused() {
+    return this.autoScrollPaused
+  }
+
+  /** Viewport page height for 横滑 / 仿真 (one screen = one page). */
+  private pageHeight(el: HTMLElement) {
+    return Math.max(1, el.clientHeight)
+  }
+
+  private maxScroll(el: HTMLElement) {
+    return Math.max(0, el.scrollHeight - this.pageHeight(el))
+  }
+
+  private maxPageIndex(el: HTMLElement) {
+    const max = this.maxScroll(el)
+    if (max <= 0) return 0
+    return Math.ceil(max / this.pageHeight(el))
+  }
+
+  private pageIndex(el: HTMLElement) {
+    const max = this.maxScroll(el)
+    if (max <= 0) return 0
+    if (el.scrollTop >= max - 2) return this.maxPageIndex(el)
+    return Math.min(this.maxPageIndex(el), Math.round(el.scrollTop / this.pageHeight(el)))
+  }
+
+  private jumpToPageIndex(el: HTMLElement, index: number) {
+    const i = Math.min(this.maxPageIndex(el), Math.max(0, index))
+    el.scrollTop = Math.min(this.maxScroll(el), i * this.pageHeight(el))
+  }
+
+  private snapToNearestPage() {
+    const el = this.contentEl
+    if (!el || this.pageTurn === 'scroll') return
+    this.jumpToPageIndex(el, this.pageIndex(el))
   }
 
   getToc(): TocItem[] {
@@ -148,13 +231,24 @@ export class TxtEngine implements ReaderEngine {
     const el = this.contentEl
     if (!el) return
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8
-    if (!atBottom) {
+    if (this.pageTurn === 'scroll') {
+      if (!atBottom) {
+        el.scrollBy({ top: el.clientHeight * 0.85, behavior: 'smooth' })
+        this.emitProgress()
+        return
+      }
+      if (this.chapterId < this.chapters.length - 1) {
+        this.chapterId++
+        this.renderChapter()
+        this.emitProgress()
+      }
+      return
+    }
+    // 横滑 / 仿真：按视口整屏分页
+    const cur = this.pageIndex(el)
+    if (cur < this.maxPageIndex(el)) {
       await this.curl.run(this.pageTurn, this.container, 'next', () => {
-        const step = this.pageTurn === 'scroll' ? el.clientHeight * 0.7 : el.clientHeight * 0.92
-        el.scrollBy({
-          top: step,
-          behavior: this.pageTurn === 'slide' ? 'auto' : this.pageTurn === 'curl' ? 'auto' : 'smooth',
-        })
+        this.jumpToPageIndex(el, cur + 1)
         this.emitProgress()
       })
       return
@@ -171,13 +265,25 @@ export class TxtEngine implements ReaderEngine {
   async prev() {
     const el = this.contentEl
     if (!el) return
-    if (el.scrollTop > 8) {
+    if (this.pageTurn === 'scroll') {
+      if (el.scrollTop > 8) {
+        el.scrollBy({ top: -el.clientHeight * 0.85, behavior: 'smooth' })
+        this.emitProgress()
+        return
+      }
+      if (this.chapterId > 0) {
+        this.chapterId--
+        this.renderChapter()
+        await new Promise((r) => requestAnimationFrame(r))
+        el.scrollTop = el.scrollHeight
+        this.emitProgress()
+      }
+      return
+    }
+    const cur = this.pageIndex(el)
+    if (cur > 0 || el.scrollTop > 4) {
       await this.curl.run(this.pageTurn, this.container, 'prev', () => {
-        const step = this.pageTurn === 'scroll' ? el.clientHeight * 0.7 : el.clientHeight * 0.92
-        el.scrollBy({
-          top: -step,
-          behavior: this.pageTurn === 'slide' ? 'auto' : this.pageTurn === 'curl' ? 'auto' : 'smooth',
-        })
+        this.jumpToPageIndex(el, Math.max(0, cur - 1))
         this.emitProgress()
       })
       return
@@ -187,7 +293,7 @@ export class TxtEngine implements ReaderEngine {
         this.chapterId--
         this.renderChapter()
         await new Promise((r) => requestAnimationFrame(r))
-        el.scrollTop = el.scrollHeight
+        this.jumpToPageIndex(el, this.maxPageIndex(el))
         this.emitProgress()
       })
     }
@@ -336,21 +442,16 @@ export class TxtEngine implements ReaderEngine {
   }
 
   private onWheelEvent = (e: WheelEvent) => {
-    // In paginated-style reading, let the shell turn pages at edges;
-    // otherwise allow native scroll and also notify shell for page-flip-at-edge.
     const el = this.contentEl
     if (!el) return
-    if (this.settings?.pageTurn === 'scroll') {
-      this.wheelCb?.(e.deltaY)
+    if (this.pageTurn === 'scroll') {
+      // 上下滑动：原生连续滚动
       return
     }
-    const atTop = el.scrollTop <= 0
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2
-    if ((e.deltaY > 0 && atBottom) || (e.deltaY < 0 && atTop)) {
-      e.preventDefault()
-      e.stopPropagation()
-      this.wheelCb?.(e.deltaY)
-    }
+    // 横滑 / 仿真：滚轮整屏翻页
+    e.preventDefault()
+    e.stopPropagation()
+    this.wheelCb?.(e.deltaY)
   }
 
   private emitProgress() {
@@ -359,6 +460,7 @@ export class TxtEngine implements ReaderEngine {
 
   private startAutoScroll(speed: number) {
     this.stopAutoScroll()
+    if (this.autoScrollPaused || speed <= 0) return
     const step = () => {
       if (this.contentEl) this.contentEl.scrollTop += speed * 0.4
       this.autoRaf = requestAnimationFrame(step)

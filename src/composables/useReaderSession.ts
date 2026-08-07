@@ -27,8 +27,11 @@ export function useReaderSession(opts: {
   const openHint = ref('正在打开…')
   const error = ref('')
   let progressTimer: number | null = null
+  /** False until initial locator restore finishes — avoids writing ~0% over a saved position. */
+  let progressSaveEnabled = false
 
   function scheduleSave(locator: Locator, pct: number) {
+    if (!progressSaveEnabled) return
     if (progressTimer) window.clearTimeout(progressTimer)
     progressTimer = window.setTimeout(() => {
       if (book.value) void books.saveProgress(book.value.id, locator, pct)
@@ -36,9 +39,13 @@ export function useReaderSession(opts: {
   }
 
   function flushProgress() {
-    if (!engine.value || !book.value) return
+    if (!engine.value || !book.value || !progressSaveEnabled) return
     const p = engine.value.getProgress()
     void books.saveProgress(book.value.id, p.locator, p.percent)
+  }
+
+  function enableProgressSave() {
+    progressSaveEnabled = true
   }
 
   async function open() {
@@ -57,7 +64,7 @@ export function useReaderSession(opts: {
       openHint.value = '正在加载文件数据…'
       const blob = await books.getBlob(b.id)
       if (!blob) {
-        error.value = b.storage === 'fs' ? '无法读取文件，请重新关联文件夹' : '文件缺失'
+        error.value = b.storage === 'fs' ? '无法读取，请重新关联目录' : '书籍缺失'
         return
       }
 
@@ -87,6 +94,8 @@ export function useReaderSession(opts: {
       engine.value = markRaw(eng)
       toc.value = eng.getToc()
       percent.value = eng.getProgress().percent
+      // Mark opened without overwriting a higher saved percent (page 1 ≈ 0%)
+      void books.touchOpened(b.id)
 
       stats.startSession(b.id)
       return { book: b, engine: eng }
@@ -127,6 +136,7 @@ export function useReaderSession(opts: {
     open,
     destroy,
     flushProgress,
+    enableProgressSave,
     applySettings,
     scheduleSave,
   }

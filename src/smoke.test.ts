@@ -52,3 +52,66 @@ describe('ocr helpers', () => {
     expect(isSparseText('这是一段足够长的可用于判断是否需要OCR的正文内容示例文字')).toBe(false)
   })
 })
+
+describe('author helpers', () => {
+  it('normalizes legacy placeholders and exports 佚名 when empty', async () => {
+    const { normalizeAuthor, displayAuthor, authorOrAnonymous } = await import('@/utils/author')
+    expect(normalizeAuthor('未知作者')).toBe('')
+    expect(normalizeAuthor('M2102K1C')).toBe('')
+    expect(normalizeAuthor('eYOU-SEPG')).toBe('')
+    expect(normalizeAuthor('  烽火戏诸侯  ')).toBe('烽火戏诸侯')
+    expect(displayAuthor('未知作者')).toBe('')
+    expect(authorOrAnonymous('')).toBe('佚名')
+    expect(authorOrAnonymous('佚名')).toBe('佚名')
+  })
+})
+
+describe('reading progress labels', () => {
+  it('uses lastReadAt so opened books are not 未读 at 0%', async () => {
+    const { readingProgressLabel, isUnread, isCurrentlyReading } = await import(
+      '@/utils/readingProgress'
+    )
+    expect(readingProgressLabel({ progressPercent: 0 })).toBe('未读')
+    expect(isUnread({ progressPercent: 0 })).toBe(true)
+    expect(readingProgressLabel({ progressPercent: 0, lastReadAt: 1 })).toBe('在读')
+    expect(isCurrentlyReading({ progressPercent: 0, lastReadAt: 1 })).toBe(true)
+    expect(readingProgressLabel({ progressPercent: 0.2, lastReadAt: 1 })).toBe('<1%')
+    expect(readingProgressLabel({ progressPercent: 7, lastReadAt: 1 })).toBe('7%')
+    expect(readingProgressLabel({ progressPercent: 99 })).toBe('读完')
+  })
+})
+
+describe('book title pick', () => {
+  it('drops placeholder metadata and falls back to filename', async () => {
+    const { sanitizeMetaTitle, pickBookTitle, isPlaceholderTitle } = await import('@/utils/bookMeta')
+    expect(sanitizeMetaTitle('项目名称')).toBeUndefined()
+    expect(sanitizeMetaTitle('空白演示')).toBeUndefined()
+    expect(sanitizeMetaTitle('城际拼车产品手册')).toBe('城际拼车产品手册')
+    expect(isPlaceholderTitle('项目名称')).toBe(true)
+    expect(pickBookTitle('项目名称', '城际拼车手册.pdf')).toBe('城际拼车手册')
+    expect(pickBookTitle('剑来', 'other.epub')).toBe('剑来')
+  })
+})
+
+describe('epub cover resolution', () => {
+  it('finds cover via meta + href-before-id item order', async () => {
+    const { parseManifestItems, resolveEpubCoverHref } = await import('@/storage/meta')
+    const opf = `
+      <metadata><meta name="cover" content="c1"/></metadata>
+      <manifest>
+        <item href="Images/Cover.jpg" id="c1" media-type="image/jpeg"/>
+      </manifest>`
+    const items = parseManifestItems(opf)
+    expect(resolveEpubCoverHref(opf, items)).toBe('Images/Cover.jpg')
+  })
+
+  it('finds EPUB3 cover-image property', async () => {
+    const { parseManifestItems, resolveEpubCoverHref } = await import('@/storage/meta')
+    const opf = `
+      <manifest>
+        <item id="img" href="cover.png" media-type="image/png" properties="cover-image"/>
+      </manifest>`
+    const items = parseManifestItems(opf)
+    expect(resolveEpubCoverHref(opf, items)).toBe('cover.png')
+  })
+})

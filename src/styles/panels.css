@@ -173,6 +173,29 @@
   cursor: pointer;
 }
 
+.schedule-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.schedule-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.schedule-inline input[type='range'] {
+  flex: 1;
+}
+
+.seg-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .seg-group {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(4.2rem, 1fr));

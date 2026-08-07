@@ -43,11 +43,12 @@ export const useBooksStore = defineStore('books', () => {
     }
 
     if (progressFilter.value === 'unread') {
-      list = list.filter((b) => (b.progressPercent || 0) <= 0)
+      list = list.filter((b) => !b.lastReadAt && (b.progressPercent || 0) <= 0)
     } else if (progressFilter.value === 'reading') {
       list = list.filter((b) => {
+        const started = Boolean(b.lastReadAt) || (b.progressPercent || 0) > 0
         const p = b.progressPercent || 0
-        return p > 0 && p < 99
+        return started && p < 99
       })
     } else if (progressFilter.value === 'done') {
       list = list.filter((b) => (b.progressPercent || 0) >= 99)
@@ -101,7 +102,7 @@ export const useBooksStore = defineStore('books', () => {
       const ratio = est.usage / est.quota
       if (ratio > 0.8) {
         quotaWarning.value = platform.env.canLinkFolder
-          ? `本地存储已使用约 ${Math.round(ratio * 100)}%。大文件请改用「关联文件夹」。`
+          ? `本地存储已使用约 ${Math.round(ratio * 100)}%。大书请改用「关联目录」。`
           : `本地存储已使用约 ${Math.round(ratio * 100)}%。`
       } else {
         quotaWarning.value = null
@@ -260,6 +261,17 @@ export const useBooksStore = defineStore('books', () => {
     }
   }
 
+  /** Mark book as opened for shelf「在读」without changing stored percent/locator. */
+  async function touchOpened(bookId: string) {
+    const updatedAt = Date.now()
+    await booksRepo.update(bookId, { lastReadAt: updatedAt, updatedAt })
+    const b = books.value.find((x) => x.id === bookId)
+    if (b) {
+      b.lastReadAt = updatedAt
+      b.updatedAt = updatedAt
+    }
+  }
+
   async function getProgress(bookId: string) {
     return progressRepo.get(bookId)
   }
@@ -301,6 +313,7 @@ export const useBooksStore = defineStore('books', () => {
     clearLibrary,
     getBlob,
     saveProgress,
+    touchOpened,
     getProgress,
     listAnnotations,
     addAnnotation,

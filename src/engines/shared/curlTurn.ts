@@ -1,9 +1,15 @@
 import type { PageTurnMode } from '@/types'
-import { playCurlIn, playCurlOut } from '@/utils/pageCurl'
+import { runDualLayerCurl } from '@/utils/pageCurl'
+import { runDualLayerSlide } from '@/utils/pageSlide'
 
-/** Shared curl animation gate for TXT / PDF / EPUB page turns. */
+/**
+ * Shared page-turn animation gate for TXT / PDF / EPUB.
+ * - scroll: no chrome animation
+ * - slide/curl on TXT/PDF: dual-layer content transition
+ * - slide/curl on EPUB: no dual-layer (iframe column layout breaks under ghost/transform)
+ */
 export function createCurlGate() {
-  let curling = false
+  let busy = false
 
   async function run(
     pageTurn: PageTurnMode,
@@ -11,18 +17,26 @@ export function createCurlGate() {
     dir: 'next' | 'prev',
     action: () => void | Promise<void>,
   ): Promise<void> {
-    if (pageTurn !== 'curl') {
+    if (pageTurn === 'scroll') {
       await action()
       return
     }
-    if (curling) return
-    curling = true
+    if (busy) return
+    busy = true
+    const el = container ?? null
     try {
-      await playCurlOut(container ?? null, dir)
-      await action()
-      await playCurlIn(container ?? null, dir)
+      // EPUB paginated flow must not be cloned/transformed — epub.js owns paging.
+      if (el?.classList.contains('epub-reader')) {
+        await action()
+        return
+      }
+      if (pageTurn === 'slide') {
+        await runDualLayerSlide(el, dir, action)
+      } else {
+        await runDualLayerCurl(el, dir, action)
+      }
     } finally {
-      curling = false
+      busy = false
     }
   }
 

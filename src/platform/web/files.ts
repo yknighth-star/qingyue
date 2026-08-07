@@ -2,8 +2,8 @@ import { idbStorage } from '@/storage/idbStorage'
 import {
   deleteBookAny,
   getBookBlobAny,
-  getLinkedRoot,
   linkLibraryFolder,
+  peekLinkedRoot,
   scanLibraryFolder,
   supportsFsAccess,
 } from '@/storage/fsStorage'
@@ -18,7 +18,8 @@ export function createWebLibraryFiles(): LibraryFiles {
     },
 
     async getLinkedRoot(): Promise<LinkedRootInfo | null> {
-      const root = await getLinkedRoot()
+      // Peek only — never requestPermission during shelf refresh / app mount
+      const root = await peekLinkedRoot()
       if (!root) return null
       return { id: root.id, name: root.name }
     },

@@ -173,6 +173,7 @@
 .reader-stage .engine-host {
   position: absolute;
   inset: 0;
+  overflow: hidden;
   cursor: default;
   caret-color: transparent;
   -webkit-user-select: text;

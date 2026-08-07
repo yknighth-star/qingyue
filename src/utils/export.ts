@@ -1,7 +1,8 @@
 import type { AnnotationRecord, BookRecord } from '@/types'
+import { authorOrAnonymous, normalizeAuthor } from '@/utils/author'
 
 export function annotationsToMarkdown(book: BookRecord, annots: AnnotationRecord[]): string {
-  const lines = [`# ${book.title}`, `作者：${book.author}`, '', '## 标注', '']
+  const lines = [`# ${book.title}`, `作者：${authorOrAnonymous(book.author)}`, '', '## 标注', '']
   for (const a of annots) {
     lines.push(`### ${a.type} · ${new Date(a.createdAt).toLocaleString()}`)
     if (a.selectedText) lines.push(`> ${a.selectedText}`)
@@ -12,7 +13,18 @@ export function annotationsToMarkdown(book: BookRecord, annots: AnnotationRecord
 }
 
 export function annotationsToJson(book: BookRecord, annots: AnnotationRecord[]): string {
-  return JSON.stringify({ book: { title: book.title, author: book.author, id: book.id }, annotations: annots }, null, 2)
+  return JSON.stringify(
+    {
+      book: {
+        title: book.title,
+        author: normalizeAuthor(book.author),
+        id: book.id,
+      },
+      annotations: annots,
+    },
+    null,
+    2,
+  )
 }
 
 export function downloadText(filename: string, content: string, mime = 'text/plain') {

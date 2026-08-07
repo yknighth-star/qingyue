@@ -12,7 +12,7 @@
   user-select: text;
 }
 
-/* epub.js stage: never show a horizontal scrollbar in the reading pane */
+/* epub.js stage */
 .epub-reader .epub-container {
   width: 100% !important;
   max-width: 100% !important;
@@ -20,15 +20,113 @@
   overflow-x: hidden !important;
 }
 
-.epub-reader .epub-view {
+/* 上下滑动：单栏，钳制宽度 */
+.epub-reader[data-turn='scroll'] .epub-view {
   max-width: 100% !important;
   box-sizing: border-box !important;
   overflow-x: hidden !important;
 }
 
-.epub-reader .epub-view iframe {
+.epub-reader[data-turn='scroll'] .epub-view iframe {
   max-width: 100% !important;
   box-sizing: border-box !important;
+}
+
+/*
+ * 横滑 / 仿真：epub.js expand() 会把 view/iframe 拉成多页宽（如 7680px），
+ * 再靠 .epub-container 的 scrollLeft 翻页。切勿 max-width:100%，否则分页失效。
+ */
+.epub-reader[data-turn='slide'] .epub-view,
+.epub-reader[data-turn='curl'] .epub-view {
+  max-width: none !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+}
+
+.epub-reader[data-turn='slide'] .epub-view iframe,
+.epub-reader[data-turn='curl'] .epub-view iframe {
+  max-width: none !important;
+  box-sizing: border-box !important;
+}
+
+.epub-reader:not([data-turn]) .epub-view,
+.epub-reader:not([data-turn]) .epub-view iframe {
+  max-width: none !important;
+  box-sizing: border-box !important;
+}
+
+/* 横滑 / 仿真：边距加在外壳，避免写入 body 破坏分栏对齐 */
+.epub-reader[data-turn='slide'],
+.epub-reader[data-turn='curl'],
+.epub-reader:not([data-turn]) {
+  box-sizing: border-box !important;
+  padding: var(--reader-margin-y, 20px) var(--reader-margin-x, 24px) !important;
+}
+
+.epub-reader[data-turn='scroll'] {
+  padding: 0 !important;
+}
+
+/*
+ * 双栏装订暗示：柔和书缝阴影带，避免「UI 分割线」感。
+ * 栏距加大，让正文与中缝留出气口。
+ */
+.txt-content[data-dual='1'] {
+  column-gap: 3.75rem;
+  column-rule: none;
+}
+
+.epub-reader[data-dual='1'],
+.txt-reader[data-dual='1'] {
+  position: relative;
+}
+
+.epub-reader[data-dual='1']::after,
+.txt-reader[data-dual='1']::after {
+  content: '';
+  position: absolute;
+  top: 11%;
+  bottom: 11%;
+  left: 50%;
+  /* 落在加宽栏缝里，不贴字 */
+  width: 20px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 3;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in srgb, var(--reader-fg, #3b2f2f) 4%, transparent) 38%,
+    color-mix(in srgb, var(--reader-fg, #3b2f2f) 6.5%, transparent) 50%,
+    color-mix(in srgb, var(--reader-fg, #3b2f2f) 3%, transparent) 62%,
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    #000 16%,
+    #000 84%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    #000 16%,
+    #000 84%,
+    transparent 100%
+  );
+}
+
+/* 深色主题再压一点，避免中缝发亮 */
+.reader-page[data-theme='dark'] .epub-reader[data-dual='1']::after,
+.reader-page[data-theme='dark'] .txt-reader[data-dual='1']::after {
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in srgb, var(--reader-fg, #e8e6e3) 3.5%, transparent) 40%,
+    color-mix(in srgb, var(--reader-fg, #e8e6e3) 5.5%, transparent) 50%,
+    transparent 100%
+  );
 }
 
 .txt-content {
