@@ -20,13 +20,21 @@
   isolation: isolate;
 }
 
-/* epub.js stage */
+/* epub.js stage — width/overflow/contain required for paginated + dual-column scroll */
 .epub-reader .epub-container {
   width: 100% !important;
   max-width: 100% !important;
   box-sizing: border-box !important;
   overflow-x: hidden !important;
   contain: paint;
+  background: var(--reader-bg, #f3ead3) !important;
+  background-color: var(--reader-bg, #f3ead3) !important;
+}
+
+.epub-reader .epub-view,
+.epub-reader .epub-view iframe {
+  background: var(--reader-bg, #f3ead3) !important;
+  background-color: var(--reader-bg, #f3ead3) !important;
 }
 
 .epub-reader[data-turn='slide'] .epub-container,

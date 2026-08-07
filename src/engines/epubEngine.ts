@@ -41,6 +41,11 @@ export class EpubEngine implements ReaderEngine {
   private gestureCb: ((e: ContentGestureEvent) => void) | null = null
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
   private boundDocs = new WeakSet<Document>()
+  /** Keep theme CSS last in iframe docs (publisher styles/scripts often append after head). */
+  private themeDocGuards = new WeakMap<Document, MutationObserver>()
+  private themeApplyDepth = 0
+  /** Ignore MutationObserver echoes from our own inline theme writes. */
+  private themeQuietUntil = 0
   private pageTurn: PageTurnMode = 'slide'
   /** 划线模式：禁止翻页抢手势，touch-action 放开拖选 */
   private selectMode = false
@@ -147,6 +152,9 @@ export class EpubEngine implements ReaderEngine {
       // Avoid style thrash on every page: lock once; typography only on new iframes (bindContentEvents).
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
+      // Re-pin theme after page turn — publisher CSS can reappear; avoid forced rewrite
+      // every relocate (dual-column / paginated scroll is sensitive to style thrash).
+      if (this.settings) this.repinThemeStylesOnly(this.settings)
     })
 
     // Background location map → stable book-level 当前/总页 (estimate).
@@ -369,8 +377,9 @@ export class EpubEngine implements ReaderEngine {
     this.normalizeChapterTitles(doc)
     this.containOverflowMedia(doc)
     if (this.settings) {
-      this.applyThemeColorsToDocument(doc, this.settings)
+      this.applyThemeColorsToDocument(doc, this.settings, true)
       this.applyTypographyToDocument(doc, this.settings)
+      this.scheduleThemeRepaint(doc)
     }
     this.syncDocTouchAction(doc)
 
@@ -602,6 +611,18 @@ export class EpubEngine implements ReaderEngine {
     this.resizeObserver?.disconnect()
     this.resizeObserver = null
     this.mark.reset()
+    try {
+      const contents = (
+        this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+      )?.getContents?.()
+      contents?.forEach((c) => {
+        const obs = c.document && this.themeDocGuards.get(c.document)
+        obs?.disconnect()
+        if (c.document) this.themeDocGuards.delete(c.document)
+      })
+    } catch {
+      /* */
+    }
     try {
       this.rendition?.destroy()
     } catch {
@@ -1214,24 +1235,93 @@ html body h6 {
   }
 
   /**
+   * Append theme stylesheet as the last node under <html> (after <body>).
+   * Head-only injection loses to publisher/script <style> tags appended in body —
+   * common on mobile CN Kindle EPUBs (dark/green washes).
+   */
+  private pinThemeStyleLast(doc: Document, styleEl: HTMLStyleElement) {
+    const root = doc.documentElement
+    if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl)
+    root.appendChild(styleEl)
+  }
+
+  private ensureThemeDocGuard(doc: Document) {
+    if (this.themeDocGuards.has(doc)) return
+    const reapply = () => {
+      if (this.themeApplyDepth > 0 || !this.settings) return
+      if (performance.now() < this.themeQuietUntil) return
+      if (!doc.defaultView || doc.defaultView.closed) return
+      this.applyThemeColorsToDocument(doc, this.settings, true)
+    }
+    const observer = new MutationObserver((mutations) => {
+      if (this.themeApplyDepth > 0 || performance.now() < this.themeQuietUntil) return
+      for (const m of mutations) {
+        if (m.type !== 'childList') continue
+        for (const n of m.addedNodes) {
+          if (!(n instanceof HTMLElement)) continue
+          if (n.id === 'qingyue-theme') continue
+          const tag = n.tagName
+          if (
+            tag === 'STYLE' ||
+            (tag === 'LINK' && (n as HTMLLinkElement).rel === 'stylesheet')
+          ) {
+            reapply()
+            return
+          }
+          if (n.querySelector?.('style, link[rel="stylesheet"]')) {
+            reapply()
+            return
+          }
+        }
+      }
+    })
+    observer.observe(doc.documentElement, {
+      childList: true,
+    })
+    if (doc.head) observer.observe(doc.head, { childList: true, subtree: true })
+    if (doc.body) {
+      // childList only — attribute watching fights epub.js column/spread layout writes.
+      observer.observe(doc.body, { childList: true })
+    }
+    this.themeDocGuards.set(doc, observer)
+
+    const onSheet = () => reapply()
+    doc.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
+      link.addEventListener('load', onSheet)
+      link.addEventListener('error', onSheet)
+    })
+  }
+
+  /**
    * Beat publisher EPUB CSS (often dark/green body with light text) so iframe
    * colors match the reader chrome theme on phone/tablet/PC.
    */
-  private applyThemeColorsToDocument(doc: Document, settings: ReaderSettings) {
+  private applyThemeColorsToDocument(doc: Document, settings: ReaderSettings, force = false) {
     const { theme, bg, fg } = this.themeColors(settings)
     const fp = `${theme}\0${bg}\0${fg}`
     const root = doc.documentElement
     const id = 'qingyue-theme'
     let styleEl = doc.getElementById(id) as HTMLStyleElement | null
-    if (styleEl?.textContent && root.dataset.qyTheme === fp) return
 
-    if (!styleEl) {
-      styleEl = doc.createElement('style')
-      styleEl.id = id
-      ;(doc.head || root).appendChild(styleEl)
-    }
+    this.themeApplyDepth += 1
+    try {
+      if (!force && styleEl?.textContent && root.dataset.qyTheme === fp) {
+        if (root.lastElementChild !== styleEl) this.pinThemeStyleLast(doc, styleEl)
+        this.paintHostSurfaces(doc, bg)
+        this.ensureThemeDocGuard(doc)
+        return
+      }
 
-    styleEl.textContent = `
+      if (!styleEl) {
+        styleEl = doc.createElement('style')
+        styleEl.id = id
+      }
+      this.pinThemeStyleLast(doc, styleEl)
+
+      // Paint surfaces with theme bg (not transparent): nested publisher fills can't peek through.
+      // Exclude media + our marks / epub.js highlights.
+      // Do NOT set height/min-height on html/body — that desyncs epub.js column pagination / dual spread.
+      styleEl.textContent = `
 html {
   background: ${bg} !important;
   background-color: ${bg} !important;
@@ -1242,48 +1332,109 @@ html body {
   background-color: ${bg} !important;
   color: ${fg} !important;
 }
-html body p,
-html body div,
-html body li,
-html body td,
-html body th,
-html body blockquote,
-html body section,
-html body article,
-html body span,
-html body font,
-html body h1,
-html body h2,
-html body h3,
-html body h4,
-html body h5,
-html body h6,
-html body p[class],
-html body div[class],
-html body span[class],
-html body section[class],
-html body article[class] {
+html body *:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]) {
+  background: ${bg} !important;
+  background-color: ${bg} !important;
+  background-image: none !important;
   color: ${fg} !important;
-  background: transparent !important;
-  background-color: transparent !important;
+}
+html body *::before,
+html body *::after {
   background-image: none !important;
 }
 html body a,
 html body a[class] {
   color: ${fg} !important;
 }
+html body mark,
+html body mark.search-hit,
+html body [class*="epubjs-hl"] {
+  color: inherit !important;
+}
 `.trim()
 
-    root.style.setProperty('background', bg, 'important')
-    root.style.setProperty('background-color', bg, 'important')
-    root.style.setProperty('color', fg, 'important')
-    const body = doc.body
-    if (body) {
-      body.style.setProperty('background', bg, 'important')
-      body.style.setProperty('background-color', bg, 'important')
-      body.style.setProperty('color', fg, 'important')
+      root.style.setProperty('background', bg, 'important')
+      root.style.setProperty('background-color', bg, 'important')
+      root.style.setProperty('color', fg, 'important')
+      const body = doc.body
+      if (body) {
+        body.style.setProperty('background', bg, 'important')
+        body.style.setProperty('background-color', bg, 'important')
+        body.style.setProperty('color', fg, 'important')
+        Array.from(body.children).forEach((node) => {
+          if (!(node instanceof HTMLElement)) return
+          const tag = node.tagName.toLowerCase()
+          if (tag === 'script' || tag === 'style' || tag === 'link') return
+          if (node.id === 'qingyue-theme') return
+          node.style.setProperty('background', bg, 'important')
+          node.style.setProperty('background-color', bg, 'important')
+          node.style.setProperty('background-image', 'none', 'important')
+          node.style.setProperty('color', fg, 'important')
+        })
+      }
+      root.dataset.qyTheme = fp
+      this.paintHostSurfaces(doc, bg)
+      this.ensureThemeDocGuard(doc)
+    } finally {
+      this.themeApplyDepth -= 1
+      this.themeQuietUntil = performance.now() + 80
     }
-    root.dataset.qyTheme = fp
+  }
+
+  /** Match iframe / epub-view chrome to theme — gaps around columns show host bg. */
+  private paintHostSurfaces(doc: Document, bg: string) {
+    try {
+      const iframe = doc.defaultView?.frameElement as HTMLIFrameElement | null
+      if (iframe) {
+        iframe.style.background = bg
+        iframe.style.backgroundColor = bg
+        let el: HTMLElement | null = iframe.parentElement
+        for (let i = 0; i < 4 && el; i++) {
+          el.style.background = bg
+          el.style.backgroundColor = bg
+          if (el.classList.contains('epub-container') || el.classList.contains('epub-reader')) break
+          el = el.parentElement
+        }
+      }
+    } catch {
+      /* */
+    }
+    if (this.container) {
+      this.container.style.background = bg
+      this.container.style.backgroundColor = bg
+    }
+  }
+
+  private scheduleThemeRepaint(doc: Document) {
+    if (!this.settings) return
+    const settings = this.settings
+    // Late publisher CSS + chapter scripts often paint after first frame on mobile WebKit.
+    for (const ms of [0, 50, 150, 400, 900, 1800, 3200]) {
+      window.setTimeout(() => {
+        if (!this.settings || this.settings !== settings) return
+        if (!doc.defaultView || doc.defaultView.closed) return
+        this.applyThemeColorsToDocument(doc, settings, true)
+      }, ms)
+    }
+  }
+
+  /** Light touch after page turn: keep stylesheet last without rewriting all surfaces. */
+  private repinThemeStylesOnly(settings: ReaderSettings) {
+    if (!this.rendition) return
+    try {
+      const contents = (
+        this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+      ).getContents?.()
+      contents?.forEach((c) => {
+        const doc = c.document
+        if (!doc) return
+        const styleEl = doc.getElementById('qingyue-theme') as HTMLStyleElement | null
+        if (styleEl) this.pinThemeStyleLast(doc, styleEl)
+        else this.applyThemeColorsToDocument(doc, settings, true)
+      })
+    } catch {
+      /* */
+    }
   }
 
   private applyThemeColorsToAllContents(settings: ReaderSettings) {
@@ -1293,10 +1444,21 @@ html body a[class] {
         this.rendition as unknown as { getContents?: () => ContentsDoc[] }
       ).getContents?.()
       contents?.forEach((c) => {
-        if (c.document) this.applyThemeColorsToDocument(c.document, settings)
+        if (c.document) this.applyThemeColorsToDocument(c.document, settings, true)
       })
     } catch {
       /* */
+    }
+    const { bg } = this.themeColors(settings)
+    if (this.container) {
+      this.container.style.background = bg
+      this.container.style.backgroundColor = bg
+      this.container.querySelectorAll('.epub-view, .epub-container').forEach((node) => {
+        if (node instanceof HTMLElement) {
+          node.style.background = bg
+          node.style.backgroundColor = bg
+        }
+      })
     }
   }
 
