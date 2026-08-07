@@ -25,9 +25,9 @@ const menuStyle = ref<Record<string, string>>({})
 const longPressTimer = ref<number | null>(null)
 let suppressOpen = false
 
-const MENU_MIN_W = 148
+const MENU_INSET = 4
 const MENU_PAD = 8
-const MENU_GAP = 6
+const MENU_GAP = 4
 
 function findBook(id: string): BookRecord | undefined {
   return props.books.find((x) => x.id === id) || store.books.find((x) => x.id === id)
@@ -45,23 +45,39 @@ function openBook(id: string) {
   emit('open', id)
 }
 
+/** Keep menu within the book card bounds (phone 3-col cards are narrow). */
 function placeMenuNear(anchor: HTMLElement, menuEl?: HTMLElement | null) {
-  const rect = anchor.getBoundingClientRect()
+  const card = anchor.closest('.book-card') as HTMLElement | null
+  const cardRect = card?.getBoundingClientRect()
+  const btnRect = anchor.getBoundingClientRect()
   const vw = window.innerWidth
   const vh = window.innerHeight
-  const width = Math.min(Math.max(MENU_MIN_W, 148), vw - MENU_PAD * 2)
-  const estimatedH = menuEl?.offsetHeight || 132
 
-  // Prefer open upward; fall back below if not enough room.
-  let top = rect.top - estimatedH - MENU_GAP
+  let left: number
+  let width: number
+  if (cardRect && cardRect.width > 40) {
+    left = cardRect.left + MENU_INSET
+    width = Math.max(72, cardRect.width - MENU_INSET * 2)
+  } else {
+    width = Math.min(148, vw - MENU_PAD * 2)
+    left = Math.max(MENU_PAD, Math.min(btnRect.right - width, vw - width - MENU_PAD))
+  }
+
+  const estimatedH = menuEl?.offsetHeight || 120
+  // Prefer just above the ⋯ button — width stays card-tied, no sideways spill.
+  let top = btnRect.top - estimatedH - MENU_GAP
+  if (cardRect && top < cardRect.top + MENU_INSET) {
+    top = Math.max(cardRect.top + MENU_INSET, btnRect.top - estimatedH - MENU_GAP)
+  }
   if (top < MENU_PAD) {
-    top = Math.min(vh - estimatedH - MENU_PAD, rect.bottom + MENU_GAP)
+    top = Math.min(vh - estimatedH - MENU_PAD, btnRect.bottom + MENU_GAP)
   }
   top = Math.max(MENU_PAD, Math.min(top, vh - MENU_PAD - 48))
 
-  // Align to anchor right edge, clamp into viewport (fixes left-column clip on phone).
-  let left = rect.right - width
-  left = Math.max(MENU_PAD, Math.min(left, vw - width - MENU_PAD))
+  if (left + width > vw - MENU_PAD) {
+    left = Math.max(MENU_PAD, vw - width - MENU_PAD)
+  }
+  if (left < MENU_PAD) left = MENU_PAD
 
   menuStyle.value = {
     position: 'fixed',

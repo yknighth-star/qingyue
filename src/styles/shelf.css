@@ -798,8 +798,9 @@
 }
 
 .book-card-menu {
-  min-width: 8.5rem;
-  padding: 0.3rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.25rem;
   border-radius: 10px;
   background: #1c2330;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -809,30 +810,36 @@
   gap: 0.1rem;
 }
 
-/* Portaled to body + fixed coords — avoids .book-card overflow:hidden clip on phone. */
+/* Portaled to body + card-width fixed coords — no sideways overflow on phone grid. */
 .book-card-menu-portal {
   box-sizing: border-box;
 }
 
 .book-card-menu-meta {
   margin: 0;
-  padding: 0.35rem 0.55rem 0.25rem;
-  font-size: 0.65rem;
+  padding: 0.3rem 0.45rem 0.2rem;
+  font-size: 0.62rem;
   color: var(--muted);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   margin-bottom: 0.1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .book-card-menu-item {
   display: flex;
   width: 100%;
   text-align: left;
-  padding: 0.5rem 0.55rem;
+  padding: 0.45rem 0.45rem;
   border-radius: 7px;
   color: var(--fg);
   background: transparent;
   border: none;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .book-card-menu-item:hover {
