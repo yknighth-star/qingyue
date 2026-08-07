@@ -1344,6 +1344,10 @@ html body h6 {
   /**
    * Beat publisher EPUB CSS (often dark/green body with light text) so iframe
    * colors match the reader chrome theme on phone/tablet/PC.
+   *
+   * Important: do NOT paint `background-color` on every descendant — that fights
+   * CSS-background illustrations and can composite over figures. Only force
+   * html/body + solid color washes; leave url(...) backgrounds alone.
    */
   private applyThemeColorsToDocument(doc: Document, settings: ReaderSettings, force = false) {
     const { theme, bg, fg } = this.themeColors(settings)
@@ -1367,13 +1371,7 @@ html body h6 {
       }
       this.pinThemeStyleLast(doc, styleEl)
 
-      // Paint theme fills with background-color only on descendants.
-      // Never use `background` shorthand / blanket background-image:none — that wipes
-      // EPUB illustrations delivered as CSS background-image (common on CN Kindle books).
-      // Do NOT set height/min-height on html/body — desyncs epub.js column pagination.
       const scheme = theme === 'dark' ? 'dark' : 'light'
-      const mediaSkip =
-        ':not(img):not(svg):not(video):not(canvas):not(picture):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"])'
       styleEl.textContent = `
 html {
   color-scheme: ${scheme} !important;
@@ -1388,30 +1386,19 @@ html body[style] {
   background-image: none !important;
   color: ${fg} !important;
 }
-html body *${mediaSkip},
-html body *[class]${mediaSkip},
-html body *[style]${mediaSkip} {
-  background-color: ${bg} !important;
+/* Text color only — never blanket background on * (breaks EPUB illustrations). */
+html body :where(p, div, li, span, a, h1, h2, h3, h4, h5, h6, td, th, blockquote, em, strong, b, i, u, small, label, font, section, article) {
   color: ${fg} !important;
 }
-html body a,
-html body a[class],
-html body a[style] {
-  color: ${fg} !important;
-}
-html body mark,
-html body mark.search-hit,
-html body [class*="epubjs-hl"] {
-  color: inherit !important;
-}
-html body img,
-html body svg,
-html body video,
-html body canvas,
-html body picture {
+html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
   background-color: transparent !important;
-  background-image: unset !important;
-  color: inherit !important;
+}
+html body :where(img, picture, video, canvas, object, embed) {
+  max-width: 100% !important;
+  height: auto !important;
+}
+html body svg {
+  max-width: 100% !important;
 }
 `.trim()
 
@@ -1423,29 +1410,7 @@ html body picture {
         body.style.setProperty('background-color', bg, 'important')
         body.style.setProperty('background-image', 'none', 'important')
         body.style.setProperty('color', fg, 'important')
-        Array.from(body.children).forEach((node) => {
-          if (!(node instanceof HTMLElement)) return
-          const tag = node.tagName.toLowerCase()
-          if (tag === 'script' || tag === 'style' || tag === 'link') return
-          if (node.id === 'qingyue-theme' || node.id === 'qingyue-typography') return
-          if (tag === 'img' || tag === 'svg' || tag === 'video' || tag === 'canvas' || tag === 'picture') {
-            return
-          }
-          // Keep CSS/background illustrations on chapter root children.
-          const inlineBg = node.style.backgroundImage
-          const hasBgImage =
-            (inlineBg && inlineBg !== 'none') ||
-            /url\(/i.test(node.getAttribute('style') || '')
-          node.style.setProperty('background-color', bg, 'important')
-          node.style.setProperty('color', fg, 'important')
-          if (!hasBgImage) {
-            // Only clear solid washes; do not touch url(...) backgrounds.
-            const computed = doc.defaultView?.getComputedStyle(node).backgroundImage
-            if (!computed || computed === 'none') {
-              node.style.setProperty('background-image', 'none', 'important')
-            }
-          }
-        })
+        this.paintPublisherWashes(doc, bg)
       }
       root.dataset.qyTheme = fp
       this.paintHostSurfaces(doc, bg)
@@ -1453,6 +1418,75 @@ html body picture {
     } finally {
       this.themeApplyDepth -= 1
       this.themeQuietUntil = performance.now() + 80
+    }
+  }
+
+  /** Override solid publisher color washes; skip media and CSS url(...) illustrations. */
+  private paintPublisherWashes(doc: Document, bg: string) {
+    const win = doc.defaultView
+    const body = doc.body
+    if (!win || !body) return
+
+    const isMedia = (tag: string) =>
+      tag === 'img' ||
+      tag === 'svg' ||
+      tag === 'video' ||
+      tag === 'canvas' ||
+      tag === 'picture' ||
+      tag === 'object' ||
+      tag === 'embed' ||
+      tag === 'source' ||
+      tag === 'script' ||
+      tag === 'style' ||
+      tag === 'link'
+
+    const hasUrlBackground = (el: HTMLElement, cs: CSSStyleDeclaration) => {
+      const inline = el.getAttribute('style') || ''
+      if (/background(-image)?\s*:[^;]*url\(/i.test(inline)) return true
+      const bi = cs.backgroundImage
+      return !!bi && bi !== 'none' && /url\(/i.test(bi)
+    }
+
+    const isTransparent = (color: string) =>
+      !color ||
+      color === 'transparent' ||
+      color === 'rgba(0, 0, 0, 0)' ||
+      color === 'rgba(0,0,0,0)'
+
+    const walk = (el: HTMLElement, depth: number) => {
+      if (depth > 6) return
+      const tag = el.tagName.toLowerCase()
+      if (isMedia(tag)) return
+      if (el.id === 'qingyue-theme' || el.id === 'qingyue-typography') return
+
+      let cs: CSSStyleDeclaration
+      try {
+        cs = win.getComputedStyle(el)
+      } catch {
+        return
+      }
+
+      if (hasUrlBackground(el, cs)) return
+
+      // Media-only wrapper: keep transparent so the figure shows.
+      const kids = Array.from(el.children).filter((n) => n instanceof HTMLElement) as HTMLElement[]
+      if (
+        kids.length > 0 &&
+        kids.every((k) => isMedia(k.tagName.toLowerCase()) || k.tagName.toLowerCase() === 'br')
+      ) {
+        el.style.setProperty('background-color', 'transparent', 'important')
+        return
+      }
+
+      if (!isTransparent(cs.backgroundColor)) {
+        el.style.setProperty('background-color', bg, 'important')
+      }
+
+      for (const child of kids) walk(child, depth + 1)
+    }
+
+    for (const child of Array.from(body.children)) {
+      if (child instanceof HTMLElement) walk(child, 0)
     }
   }
 
@@ -1627,13 +1661,14 @@ html body picture {
         {
           ...typeface,
           color: `${fg} !important`,
-          // background-color only — `background` shorthand clears CSS image illustrations.
-          'background-color': `${bg} !important`,
         },
-      'img, svg, video, canvas, picture': {
+      'img, picture, video, canvas': {
         'max-width': '100% !important',
         height: 'auto !important',
-        'object-fit': 'contain !important',
+        'background-color': 'transparent !important',
+      },
+      svg: {
+        'max-width': '100% !important',
         'background-color': 'transparent !important',
       },
       table: {
@@ -1742,14 +1777,21 @@ html body picture {
     }
   }
 
-  /** Constrain fixed-size Kindle images / wide media so the reader never needs horizontal scroll. */
+  /** Constrain wide bitmaps; never force SVG height:auto (collapses many Kindle figures to 0). */
   private containOverflowMedia(doc: Document) {
-    doc.querySelectorAll('img, svg, video, canvas').forEach((node) => {
+    doc.querySelectorAll('img, video, canvas, picture').forEach((node) => {
       if (!(node instanceof HTMLElement)) return
       node.style.setProperty('max-width', '100%', 'important')
       node.style.setProperty('height', 'auto', 'important')
-      node.removeAttribute('width')
-      node.removeAttribute('height')
+      if (node instanceof HTMLImageElement || node instanceof HTMLVideoElement) {
+        node.removeAttribute('width')
+        node.removeAttribute('height')
+      }
+    })
+    doc.querySelectorAll('svg').forEach((node) => {
+      if (!(node instanceof SVGElement)) return
+      // Cap width only — never height:auto / strip attrs (collapses Kindle SVG figures).
+      node.style.setProperty('max-width', '100%', 'important')
     })
 
     // Do not force iframe/body width in paginated mode — that collapses epub.js multi-page expand.

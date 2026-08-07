@@ -4,7 +4,6 @@ export const APP_THEME_COLOR = '#1a1f2e'
 /**
  * Keep mobile browser toolbar / status tint in sync with the visible page.
  * Android Chrome often ignores in-place `content` updates — remount the meta tag.
- * Also set `color-scheme` so form controls and overscroll match light/dark themes.
  */
 export function setBrowserThemeColor(
   color: string,
@@ -18,8 +17,11 @@ export function setBrowserThemeColor(
   meta.content = color
   document.head.appendChild(meta)
 
-  document.documentElement.style.colorScheme = colorScheme
-  document.documentElement.style.backgroundColor = color
+  const root = document.documentElement
+  root.style.colorScheme = colorScheme
+  root.style.backgroundColor = color
+  // Overscroll / rubber-band areas follow body on many mobile browsers.
+  document.body.style.backgroundColor = color
 }
 
 export function resetBrowserThemeColor() {

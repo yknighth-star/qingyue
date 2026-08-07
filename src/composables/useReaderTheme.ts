@@ -34,7 +34,12 @@ export function useReaderTheme(opts: {
     const mode = themeMode.value
     const vars = THEME_VARS[mode]
     const el = opts.pageRef.value
-    if (el) Object.entries(vars).forEach(([k, v]) => el.style.setProperty(k, v))
+    if (el) {
+      Object.entries(vars).forEach(([k, v]) => el.style.setProperty(k, v))
+      // Mirror onto page root so chrome / safe-area match immediately.
+      el.style.backgroundColor = vars['--reader-bg'] || ''
+      el.style.color = vars['--reader-fg'] || ''
+    }
     const bg = vars['--reader-bg']
     if (bg) setBrowserThemeColor(bg, themeColorScheme(mode))
   }

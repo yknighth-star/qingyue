@@ -278,8 +278,12 @@ function onStagePointerUpCombined(e: PointerEvent) {
   onPointerUp()
 }
 
-watch(themeMode, () => {
+watch(themeMode, (mode, prev) => {
   syncPageTheme()
+  if (!prev || mode === prev) return
+  const label =
+    mode === 'sepia' ? '羊皮纸' : mode === 'green' ? '护眼绿' : mode === 'dark' ? '深色' : '浅色'
+  flashStatus(`主题：${label}`)
 })
 
 watch(chromeVisible, async () => {
