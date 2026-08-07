@@ -1358,6 +1358,56 @@ html body h6 {
       this.pinThemeStyleLast(doc, styleEl)
 
       const scheme = theme === 'dark' ? 'dark' : 'light'
+      // Match typography specificity: publisher Kindle CSS uses .class !important.
+      // :where() has zero specificity and loses — that made only near-green washes
+      // look "correct" while sepia/light/dark never stuck on mobile.
+      const textSel = [
+        'p',
+        'div',
+        'li',
+        'span',
+        'a',
+        'h1',
+        'h2',
+        'h3',
+        'h4',
+        'h5',
+        'h6',
+        'td',
+        'th',
+        'blockquote',
+        'em',
+        'strong',
+        'b',
+        'i',
+        'u',
+        'small',
+        'label',
+        'font',
+        'section',
+        'article',
+        'pre',
+        'code',
+      ]
+        .flatMap((t) => [`html body ${t}`, `html body ${t}[class]`, `html body ${t}[style]`])
+        .join(',\n')
+      const fillSel = [
+        'p',
+        'div',
+        'li',
+        'td',
+        'th',
+        'blockquote',
+        'section',
+        'article',
+        'pre',
+      ]
+        .flatMap((t) => [
+          `html body ${t}`,
+          `html body ${t}[class]`,
+          `html body ${t}[style]`,
+        ])
+        .join(',\n')
       styleEl.textContent = `
 html {
   color-scheme: ${scheme} !important;
@@ -1371,12 +1421,32 @@ html body[style] {
   background-color: ${bg} !important;
   background-image: none !important;
   color: ${fg} !important;
+  -webkit-text-fill-color: ${fg} !important;
 }
-/* Text color only — never blanket background on * (breaks EPUB illustrations). */
-html body :where(p, div, li, span, a, h1, h2, h3, h4, h5, h6, td, th, blockquote, em, strong, b, i, u, small, label, font, section, article) {
+${textSel} {
   color: ${fg} !important;
+  -webkit-text-fill-color: ${fg} !important;
 }
-html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
+${fillSel} {
+  background-color: ${bg} !important;
+}
+html body img,
+html body img[class],
+html body svg,
+html body video,
+html body canvas,
+html body picture,
+html body object,
+html body embed {
+  background-color: transparent !important;
+  -webkit-text-fill-color: initial !important;
+  color: inherit !important;
+}
+html body :has(> img):not(body),
+html body :has(> svg):not(body),
+html body :has(> picture):not(body),
+html body :has(> video):not(body),
+html body :has(> canvas):not(body) {
   background-color: transparent !important;
 }
 `.trim()
@@ -1389,7 +1459,8 @@ html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
         body.style.setProperty('background-color', bg, 'important')
         body.style.setProperty('background-image', 'none', 'important')
         body.style.setProperty('color', fg, 'important')
-        this.paintPublisherWashes(doc, bg)
+        body.style.setProperty('-webkit-text-fill-color', fg, 'important')
+        this.paintPublisherWashes(doc, bg, fg)
       }
       root.dataset.qyTheme = fp
       this.paintHostSurfaces(doc, bg)
@@ -1401,7 +1472,7 @@ html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
   }
 
   /** Override solid publisher color washes; skip media and CSS url(...) illustrations. */
-  private paintPublisherWashes(doc: Document, bg: string) {
+  private paintPublisherWashes(doc: Document, bg: string, fg: string) {
     const win = doc.defaultView
     const body = doc.body
     if (!win || !body) return
@@ -1433,7 +1504,7 @@ html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
       color === 'rgba(0,0,0,0)'
 
     const walk = (el: HTMLElement, depth: number) => {
-      if (depth > 6) return
+      if (depth > 8) return
       const tag = el.tagName.toLowerCase()
       if (isMedia(tag)) return
       if (el.id === 'qingyue-theme' || el.id === 'qingyue-typography') return
@@ -1447,7 +1518,6 @@ html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
 
       if (hasUrlBackground(el, cs)) return
 
-      // Media-only wrapper: keep transparent so the figure shows.
       const kids = Array.from(el.children).filter((n) => n instanceof HTMLElement) as HTMLElement[]
       if (
         kids.length > 0 &&
@@ -1460,6 +1530,9 @@ html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
       if (!isTransparent(cs.backgroundColor)) {
         el.style.setProperty('background-color', bg, 'important')
       }
+      // Inline !important beats publisher .class { color: #fff !important } on mobile WebKit.
+      el.style.setProperty('color', fg, 'important')
+      el.style.setProperty('-webkit-text-fill-color', fg, 'important')
 
       for (const child of kids) walk(child, depth + 1)
     }
@@ -1640,6 +1713,12 @@ html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
         {
           ...typeface,
           color: `${fg} !important`,
+          'background-color': `${bg} !important`,
+        },
+      'body p[class], body div[class], body li[class], body span[class], body td[class], body th[class], body blockquote[class], body section[class], body article[class]':
+        {
+          color: `${fg} !important`,
+          'background-color': `${bg} !important`,
         },
       'img, picture, video, canvas': {
         'max-width': '100% !important',
@@ -1647,6 +1726,9 @@ html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
       },
       svg: {
         'max-width': '100% !important',
+        'background-color': 'transparent !important',
+      },
+      'div:has(> img), div:has(> svg), div:has(> picture), p:has(> img), p:has(> svg)': {
         'background-color': 'transparent !important',
       },
       table: {
