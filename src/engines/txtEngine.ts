@@ -335,6 +335,10 @@ export class TxtEngine implements ReaderEngine {
     // TXT uses host stage click zones; EPUB iframes need engine tap forwarding.
   }
 
+  onContentGesture(_cb: (e: import('./types').ContentGestureEvent) => void) {
+    // TXT: stage pointer handlers cover swipe.
+  }
+
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {
     this.selectionCb = cb
   }

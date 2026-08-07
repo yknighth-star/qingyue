@@ -1,8 +1,9 @@
 import type { Ref } from 'vue'
 import type { ReaderEngine } from '@/engines/types'
-import type { ContentTapEvent } from '@/engines/types'
+import type { ContentGestureEvent, ContentTapEvent } from '@/engines/types'
 import type { BookRecord, PageTurnMode } from '@/types'
 import type { ReaderPanel } from './useReaderChrome'
+import { resolveTurnProfile, type TurnProfile } from '@/utils/turnProfile'
 
 export function useReaderGestures(opts: {
   engine: Ref<ReaderEngine | null>
@@ -10,6 +11,7 @@ export function useReaderGestures(opts: {
   panel: Ref<ReaderPanel>
   stageRef: Ref<HTMLElement | null>
   pageTurn: () => PageTurnMode
+  turnProfile: () => TurnProfile
   shouldBlockTapActions: () => boolean
   hasTextSelection: () => boolean
   selectionBar: Ref<unknown>
@@ -26,6 +28,8 @@ export function useReaderGestures(opts: {
         y0: number
         t0: number
         dragging: boolean
+        lastX: number
+        lastY: number
       }
     | null = null
   let ignoreClickUntil = 0
@@ -39,10 +43,17 @@ export function useReaderGestures(opts: {
     return m === 'slide' || m === 'curl'
   }
 
+  function isEpub() {
+    return opts.book.value?.format === 'epub'
+  }
+
+  function allowLiveCurlPreview() {
+    return opts.pageTurn() === 'curl' && opts.turnProfile().liveCurlPreview && !isEpub()
+  }
+
   function turnByDelta(deltaY: number) {
     if (!opts.engine.value || opts.panel.value !== 'none') return
     if (opts.shouldBlockTapActions()) return
-    // 上下滑动：滚轮交给内容区连续滚动，不整页跳
     if (isScrollMode()) return
     const now = Date.now()
     if (now < wheelLockUntil) return
@@ -66,10 +77,13 @@ export function useReaderGestures(opts: {
 
   function onEdgeTurn(dir: 'prev' | 'next') {
     if (opts.shouldBlockTapActions()) return
-    // 上下滑动：禁用左右热区翻页（竞品同款）
     if (isScrollMode()) return
     if (dir === 'prev') void opts.engine.value?.prev()
     else void opts.engine.value?.next()
+  }
+
+  function edgeFrac() {
+    return opts.turnProfile().edgeWidth
   }
 
   function onStageClick(e: MouseEvent) {
@@ -85,11 +99,12 @@ export function useReaderGestures(opts: {
     const rect = stage.getBoundingClientRect()
     const x = (e.clientX - rect.left) / rect.width
     if (!isScrollMode()) {
-      if (x < 0.22) {
+      const edge = edgeFrac()
+      if (x < edge) {
         onEdgeTurn('prev')
         return
       }
-      if (x > 0.78) {
+      if (x > 1 - edge) {
         onEdgeTurn('next')
         return
       }
@@ -117,12 +132,13 @@ export function useReaderGestures(opts: {
     if (!isScrollMode()) {
       const rect = stage.getBoundingClientRect()
       const x = (ev.clientX - rect.left) / Math.max(1, rect.width)
+      const edge = edgeFrac()
       if (x > 0 && x < 1) {
-        if (x < 0.22) {
+        if (x < edge) {
           onEdgeTurn('prev')
           return
         }
-        if (x > 0.78) {
+        if (x > 1 - edge) {
           onEdgeTurn('next')
           return
         }
@@ -139,12 +155,79 @@ export function useReaderGestures(opts: {
   }
 
   function applyCurlDragPreview(dir: 'next' | 'prev', progress: number) {
+    if (!allowLiveCurlPreview()) return
     const stage = opts.stageRef.value
-    if (!stage || opts.pageTurn() !== 'curl') return
+    if (!stage) return
     const p = Math.min(1, Math.max(0, progress))
     stage.classList.add('curl-drag', dir === 'next' ? 'curl-drag-next' : 'curl-drag-prev')
     stage.classList.remove(dir === 'next' ? 'curl-drag-prev' : 'curl-drag-next')
     stage.style.setProperty('--curl-drag', String(p))
+  }
+
+  function beginSwipe(pointerId: number, clientX: number, clientY: number) {
+    if (!isPagedMode() || opts.panel.value !== 'none') return
+    if (opts.shouldBlockTapActions() || opts.hasTextSelection()) return
+    swipe = {
+      id: pointerId,
+      x0: clientX,
+      y0: clientY,
+      t0: Date.now(),
+      dragging: false,
+      lastX: clientX,
+      lastY: clientY,
+    }
+  }
+
+  function moveSwipe(pointerId: number, clientX: number, clientY: number, prevent?: () => void) {
+    if (!swipe || swipe.id !== pointerId) return
+    swipe.lastX = clientX
+    swipe.lastY = clientY
+    const dx = clientX - swipe.x0
+    const dy = clientY - swipe.y0
+    if (!swipe.dragging) {
+      if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return
+      if (Math.abs(dy) > Math.abs(dx) * 1.15) {
+        swipe = null
+        clearCurlDragPreview()
+        return
+      }
+      swipe.dragging = true
+    }
+    prevent?.()
+    if (allowLiveCurlPreview()) {
+      const w = opts.stageRef.value?.clientWidth || 320
+      if (dx < 0) applyCurlDragPreview('next', Math.min(1, -dx / (w * 0.55)))
+      else applyCurlDragPreview('prev', Math.min(1, dx / (w * 0.55)))
+    }
+  }
+
+  function endSwipe(pointerId: number, clientX?: number, clientY?: number) {
+    if (!swipe || swipe.id !== pointerId) return
+    const x = clientX ?? swipe.lastX
+    const y = clientY ?? swipe.lastY
+    const dx = x - swipe.x0
+    const dy = y - swipe.y0
+    const dt = Date.now() - swipe.t0
+    const wasDrag = swipe.dragging
+    swipe = null
+    clearCurlDragPreview()
+    if (!wasDrag || !isPagedMode()) return
+    const profile = opts.turnProfile()
+    if (Math.abs(dx) < profile.swipeMinPx || Math.abs(dx) < Math.abs(dy) * 1.2) return
+    const w = opts.stageRef.value?.clientWidth || 320
+    const enough =
+      Math.abs(dx) > Math.min(88, w * profile.swipeWidthFactor) ||
+      (dt < 280 && Math.abs(dx) > profile.swipeMinPx)
+    if (!enough) return
+    ignoreClickUntil = Date.now() + 350
+    if (dx < 0) void opts.engine.value?.next()
+    else void opts.engine.value?.prev()
+  }
+
+  function cancelSwipe(pointerId: number) {
+    if (!swipe || swipe.id !== pointerId) return
+    swipe = null
+    clearCurlDragPreview()
   }
 
   function onStagePointerDown(e: PointerEvent) {
@@ -153,13 +236,8 @@ export function useReaderGestures(opts: {
     if (opts.shouldBlockTapActions() || opts.hasTextSelection()) return
     const t = e.target as HTMLElement | null
     if (t?.closest?.('button, a, input, textarea, .reader-chrome, .panel, .dict-popup')) return
-    swipe = {
-      id: e.pointerId,
-      x0: e.clientX,
-      y0: e.clientY,
-      t0: Date.now(),
-      dragging: false,
-    }
+    // Edge zones: allow swipe; clicks still handled via @click on zones / stage
+    beginSwipe(e.pointerId, e.clientX, e.clientY)
     try {
       opts.stageRef.value?.setPointerCapture?.(e.pointerId)
     } catch {
@@ -168,50 +246,32 @@ export function useReaderGestures(opts: {
   }
 
   function onStagePointerMove(e: PointerEvent) {
-    if (!swipe || swipe.id !== e.pointerId) return
-    const dx = e.clientX - swipe.x0
-    const dy = e.clientY - swipe.y0
-    if (!swipe.dragging) {
-      if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return
-      // Prefer vertical → abort (let scroll / selection win)
-      if (Math.abs(dy) > Math.abs(dx) * 1.15) {
-        swipe = null
-        clearCurlDragPreview()
-        return
-      }
-      swipe.dragging = true
-    }
-    e.preventDefault()
-    if (opts.pageTurn() === 'curl') {
-      const w = opts.stageRef.value?.clientWidth || 320
-      if (dx < 0) applyCurlDragPreview('next', Math.min(1, -dx / (w * 0.55)))
-      else applyCurlDragPreview('prev', Math.min(1, dx / (w * 0.55)))
-    }
+    moveSwipe(e.pointerId, e.clientX, e.clientY, () => e.preventDefault())
   }
 
   function onStagePointerUp(e: PointerEvent) {
-    if (!swipe || swipe.id !== e.pointerId) return
-    const dx = e.clientX - swipe.x0
-    const dy = e.clientY - swipe.y0
-    const dt = Date.now() - swipe.t0
-    const wasDrag = swipe.dragging
-    swipe = null
-    clearCurlDragPreview()
-    if (!wasDrag || !isPagedMode()) return
-    if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy) * 1.2) return
-    // Quick flick or long drag past threshold
-    const w = opts.stageRef.value?.clientWidth || 320
-    const enough = Math.abs(dx) > Math.min(88, w * 0.18) || (dt < 280 && Math.abs(dx) > 40)
-    if (!enough) return
-    ignoreClickUntil = Date.now() + 350
-    if (dx < 0) void opts.engine.value?.next()
-    else void opts.engine.value?.prev()
+    endSwipe(e.pointerId, e.clientX, e.clientY)
   }
 
   function onStagePointerCancel(e: PointerEvent) {
-    if (!swipe || swipe.id !== e.pointerId) return
-    swipe = null
-    clearCurlDragPreview()
+    cancelSwipe(e.pointerId)
+  }
+
+  /** Gestures forwarded from EPUB (and future) content documents. */
+  function onContentGesture(ev: ContentGestureEvent) {
+    if (ev.phase === 'start') {
+      beginSwipe(ev.pointerId, ev.clientX, ev.clientY)
+      return
+    }
+    if (ev.phase === 'move') {
+      moveSwipe(ev.pointerId, ev.clientX, ev.clientY)
+      return
+    }
+    if (ev.phase === 'cancel') {
+      cancelSwipe(ev.pointerId)
+      return
+    }
+    endSwipe(ev.pointerId, ev.clientX, ev.clientY)
   }
 
   return {
@@ -221,6 +281,7 @@ export function useReaderGestures(opts: {
     onEdgeTurn,
     onStageClick,
     onContentTap,
+    onContentGesture,
     onStagePointerDown,
     onStagePointerMove,
     onStagePointerUp,

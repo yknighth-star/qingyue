@@ -305,7 +305,7 @@
   position: absolute;
   top: 10%;
   bottom: 10%;
-  width: 18%;
+  width: var(--edge-width, 11%);
   z-index: 5;
   /* Keep clear of native scrollbars so drag/hover isn't stolen */
   --scrollbar-gutter: 16px;
@@ -324,7 +324,7 @@
 }
 
 .reader-page.desktop .edge-zone {
-  width: 9%;
+  width: var(--edge-width, 9%);
   top: 0;
   bottom: var(--scrollbar-gutter);
 }

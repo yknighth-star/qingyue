@@ -9,6 +9,17 @@ export interface ContentTapEvent {
   hasSelection?: boolean
 }
 
+export type ContentGesturePhase = 'start' | 'move' | 'end' | 'cancel'
+
+/** Pointer gesture inside content (including EPUB iframe), coords in parent viewport. */
+export interface ContentGestureEvent {
+  phase: ContentGesturePhase
+  pointerId: number
+  clientX: number
+  clientY: number
+  pointerType: string
+}
+
 export interface SelectionCaptureEvent {
   text: string
   locator: Locator
@@ -84,6 +95,11 @@ export interface ReaderEngine {
   onWheel(cb: (deltaY: number) => void): void
   /** Click/tap inside content area (including EPUB iframe). */
   onContentTap(cb: (e: ContentTapEvent) => void): void
+  /**
+   * Pointer swipe/drag inside content (including EPUB iframe).
+   * Engines without iframes may no-op; stage handlers cover TXT/PDF.
+   */
+  onContentGesture(cb: (e: ContentGestureEvent) => void): void
   /** Text selection ready (including EPUB iframe mouseup). */
   onSelection(cb: (e: SelectionCaptureEvent | null) => void): void
   applyAnnotations(annots: AnnotationRecord[]): void

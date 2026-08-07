@@ -44,6 +44,28 @@ describe('engine capabilities', () => {
   })
 })
 
+describe('turn profile (phone / tablet / desktop)', () => {
+  it('maps width bands and curl budget', async () => {
+    const { resolveTurnProfile, resolveTurnAnim } = await import('@/utils/turnProfile')
+    const phone = resolveTurnProfile(390)
+    expect(phone.device).toBe('phone')
+    expect(phone.curlAnim).toBe('lite-curl')
+    expect(phone.edgeWidth).toBeLessThan(0.15)
+
+    const tablet = resolveTurnProfile(900)
+    expect(tablet.device).toBe('tablet')
+    expect(tablet.dualEligible).toBe(false)
+
+    const desktop = resolveTurnProfile(1280)
+    expect(desktop.device).toBe('desktop')
+    expect(desktop.dualEligible).toBe(true)
+
+    expect(resolveTurnAnim('scroll', phone)).toBe('none')
+    expect(resolveTurnAnim('slide', phone)).toBe('slide')
+    expect(resolveTurnAnim('curl', phone)).toBe('lite-curl')
+  })
+})
+
 describe('ocr helpers', () => {
   it('detects sparse embedded text', async () => {
     const { isSparseText } = await import('@/utils/offlineOcr')

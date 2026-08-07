@@ -359,6 +359,10 @@ export class PdfEngine implements ReaderEngine {
     // PDF uses host stage click zones.
   }
 
+  onContentGesture(_cb: (e: import('./types').ContentGestureEvent) => void) {
+    // PDF: stage pointer handlers cover swipe.
+  }
+
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {
     this.selectionCb = cb
   }

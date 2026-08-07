@@ -6,6 +6,7 @@ import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
 import { indexOfIgnoreCase } from '@/utils/searchText'
 import {
   FULL_ENGINE_CAPABILITIES,
+  type ContentGestureEvent,
   type ContentTapEvent,
   type ReaderEngine,
   type SelectionCaptureEvent,
@@ -31,6 +32,7 @@ export class EpubEngine implements ReaderEngine {
   private progressCb: ((p: { locator: Locator; percent: number }) => void) | null = null
   private wheelCb: ((deltaY: number) => void) | null = null
   private tapCb: ((e: ContentTapEvent) => void) | null = null
+  private gestureCb: ((e: ContentGestureEvent) => void) | null = null
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
   private boundDocs = new WeakSet<Document>()
   private pageTurn: PageTurnMode = 'slide'
@@ -252,6 +254,29 @@ export class EpubEngine implements ReaderEngine {
     }, 50)
   }
 
+  private syncDocTouchAction(doc: Document) {
+    const root = doc.documentElement
+    if (!root) return
+    if (this.pageTurn === 'scroll') {
+      root.style.touchAction = 'pan-y'
+      root.dataset.qyTurn = 'scroll'
+    } else {
+      root.style.touchAction = 'none'
+      root.dataset.qyTurn = 'paged'
+    }
+  }
+
+  private syncAllDocsTouchAction() {
+    const contents = (
+      this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+    )?.getContents?.()
+    if (!contents?.length) return
+    for (const c of contents) {
+      const doc = c.document
+      if (doc) this.syncDocTouchAction(doc)
+    }
+  }
+
   private bindContentEvents(contents: ContentsDoc) {
     const doc = contents.document
     if (!doc || this.boundDocs.has(doc)) return
@@ -262,6 +287,7 @@ export class EpubEngine implements ReaderEngine {
     this.normalizeChapterTitles(doc)
     this.containOverflowMedia(doc)
     if (this.settings) this.applyTypographyToDocument(doc, this.settings)
+    this.syncDocTouchAction(doc)
 
     // Re-apply search marks when chapter iframe mounts / remounts
     if (this.searchHl.get() && doc.body) {
@@ -318,6 +344,78 @@ export class EpubEngine implements ReaderEngine {
       const p = mapPointToParentViewport(e.clientX, e.clientY, doc)
       this.tapCb?.({ clientX: p.x, clientY: p.y, isLink, hasSelection })
     })
+
+    // Bridge swipe/drag to reader shell (phone / tablet / PC touch & pen).
+    let localSwipe: {
+      id: number
+      x0: number
+      y0: number
+      dragging: boolean
+    } | null = null
+
+    const emitGesture = (
+      phase: ContentGestureEvent['phase'],
+      e: PointerEvent,
+    ) => {
+      const p = mapPointToParentViewport(e.clientX, e.clientY, doc)
+      this.gestureCb?.({
+        phase,
+        pointerId: e.pointerId,
+        clientX: p.x,
+        clientY: p.y,
+        pointerType: e.pointerType || 'touch',
+      })
+    }
+
+    doc.addEventListener(
+      'pointerdown',
+      (e) => {
+        if (this.pageTurn === 'scroll') return
+        if (e.pointerType === 'mouse' && e.button !== 0) return
+        const t = e.target as HTMLElement | null
+        if (t?.closest?.('a, button, input, textarea')) return
+        const sel = doc.getSelection()
+        if (sel && !sel.isCollapsed && sel.toString().trim()) return
+        localSwipe = { id: e.pointerId, x0: e.clientX, y0: e.clientY, dragging: false }
+        emitGesture('start', e)
+      },
+      { passive: true },
+    )
+
+    doc.addEventListener(
+      'pointermove',
+      (e) => {
+        if (!localSwipe || localSwipe.id !== e.pointerId) return
+        const dx = e.clientX - localSwipe.x0
+        const dy = e.clientY - localSwipe.y0
+        if (!localSwipe.dragging) {
+          if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return
+          if (Math.abs(dy) > Math.abs(dx) * 1.15) {
+            localSwipe = null
+            emitGesture('cancel', e)
+            return
+          }
+          localSwipe.dragging = true
+          try {
+            doc.documentElement.setPointerCapture?.(e.pointerId)
+          } catch {
+            /* */
+          }
+        }
+        e.preventDefault()
+        emitGesture('move', e)
+      },
+      { passive: false },
+    )
+
+    const endLocal = (phase: 'end' | 'cancel', e: PointerEvent) => {
+      if (!localSwipe || localSwipe.id !== e.pointerId) return
+      localSwipe = null
+      emitGesture(phase, e)
+    }
+
+    doc.addEventListener('pointerup', (e) => endLocal('end', e), { passive: true })
+    doc.addEventListener('pointercancel', (e) => endLocal('cancel', e), { passive: true })
   }
 
   destroy() {
@@ -341,6 +439,7 @@ export class EpubEngine implements ReaderEngine {
     this.rendition = null
     this.selectionCb = null
     this.tapCb = null
+    this.gestureCb = null
     this.wheelCb = null
     this.progressCb = null
     if (this.container) this.container.innerHTML = ''
@@ -355,6 +454,7 @@ export class EpubEngine implements ReaderEngine {
       this.container.dataset.turn = settings.pageTurn
       applyThemeVars(this.container, effectiveTheme(settings), settings)
     }
+    this.syncAllDocsTouchAction()
     this.applyThemeToRendition(settings)
     this.applyTypographyToAllContents(settings)
     // pageTurn only applied at open() before — switch flow live when mode changes
@@ -590,6 +690,10 @@ export class EpubEngine implements ReaderEngine {
 
   onContentTap(cb: (e: ContentTapEvent) => void) {
     this.tapCb = cb
+  }
+
+  onContentGesture(cb: (e: ContentGestureEvent) => void) {
+    this.gestureCb = cb
   }
 
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {

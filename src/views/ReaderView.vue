@@ -12,7 +12,8 @@ import { useReaderSession } from '@/composables/useReaderSession'
 import { useReaderTts } from '@/composables/useReaderTts'
 import { useSelectionAnnot } from '@/composables/useSelectionAnnot'
 import { detectDevice, effectiveTheme, formatPercent, THEME_VARS } from '@/utils/format'
-import type { ContentTapEvent, SelectionCaptureEvent } from '@/engines/types'
+import { resolveTurnProfile } from '@/utils/turnProfile'
+import type { ContentGestureEvent, ContentTapEvent, SelectionCaptureEvent } from '@/engines/types'
 import type { TocItem } from '@/types'
 import ReaderTocPanel from '@/components/reader/ReaderTocPanel.vue'
 import ReaderSearchPanel from '@/components/reader/ReaderSearchPanel.vue'
@@ -32,6 +33,7 @@ const host = ref<HTMLElement | null>(null)
 const stageRef = ref<HTMLElement | null>(null)
 const pageRef = ref<HTMLElement | null>(null)
 const isFinePointer = ref(false)
+const turnProfile = ref(resolveTurnProfile())
 const statusMsg = ref('')
 let statusTimer: number | null = null
 /** Bumps so schedule/system appearance recomputes without settings change */
@@ -84,6 +86,7 @@ const {
 
 const wheelHandler = { fn: (_deltaY: number) => {} }
 const tapHandler = { fn: (_ev: ContentTapEvent) => {} }
+const gestureHandler = { fn: (_ev: ContentGestureEvent) => {} }
 const selectionHandler = { fn: (_ev: SelectionCaptureEvent | null) => {} }
 
 const {
@@ -104,6 +107,7 @@ const {
   host,
   onWheel: (d) => wheelHandler.fn(d),
   onContentTap: (ev) => tapHandler.fn(ev),
+  onContentGesture: (ev) => gestureHandler.fn(ev),
   onSelection: (ev) => selectionHandler.fn(ev),
 })
 
@@ -185,6 +189,7 @@ const {
   onEdgeTurn,
   onStageClick,
   onContentTap,
+  onContentGesture,
   onStagePointerDown,
   onStagePointerMove,
   onStagePointerUp,
@@ -195,6 +200,7 @@ const {
   panel,
   stageRef,
   pageTurn: () => settings.value.pageTurn,
+  turnProfile: () => turnProfile.value,
   shouldBlockTapActions,
   hasTextSelection,
   selectionBar,
@@ -205,6 +211,7 @@ const {
 })
 
 wheelHandler.fn = onEngineWheel
+gestureHandler.fn = onContentGesture
 tapHandler.fn = (ev: ContentTapEvent) => {
   const s = settings.value
   if (
@@ -357,6 +364,7 @@ function onKey(e: KeyboardEvent) {
 
 function refreshPointerMode() {
   isFinePointer.value = window.matchMedia('(pointer: fine)').matches
+  turnProfile.value = resolveTurnProfile()
   const wide = window.innerWidth >= 1100
   if (wide !== viewportWide.value) {
     viewportWide.value = wide
@@ -441,6 +449,10 @@ onBeforeUnmount(() => {
     :class="{ desktop: desktopUi, 'annot-active': annotUiActive, 'panel-open': panel !== 'none' }"
     :data-turn="settings.pageTurn"
     :data-theme="themeMode"
+    :data-device="turnProfile.device"
+    :data-anim="turnProfile.curlAnim"
+    :data-pointer="turnProfile.fine ? 'fine' : 'coarse'"
+    :style="{ '--edge-width': `${turnProfile.edgeWidth * 100}%` }"
   >
     <header v-show="chromeVisible" class="reader-chrome" @mousedown="clearUiSelection">
       <button class="btn ghost" @click="back">返回</button>

@@ -1,5 +1,5 @@
 ---
-description: 轻阅（qingyue）产品与工程约束——本地优先、合规工具、跨端预留、禁止擅自装重型工具链
+description: 轻阅（qingyue）产品与工程约束——建设阶段、本地优先、合规工具、跨端预留、禁止擅自装重型工具链
 alwaysApply: true
 ---
 
@@ -10,6 +10,13 @@ alwaysApply: true
 - 本地文档 / 电子书阅读 PWA（Vue 3 + Vite + TypeScript）。
 - 支持 EPUB / TXT / PDF；数据默认仅存本机（IndexedDB / 关联文件夹）。
 - 使用场景：国内个人自用；不做成公开分享或内容分发站。
+
+## 建设阶段（当前）
+
+- **当前处于项目建设阶段**：以把架构与体验做对为优先，**不要默认「尽量不大改 / 只打补丁」**。
+- 已有**专业方案**（根因级、跨层、需重构手势/引擎/动效管道等）时：**按方案落地**，允许必要的结构性改动与文件拆分；禁止用「改动面太大」回避正确修法。
+- 仍须遵守本文件合规边界与「与用户确认后再做」清单；建设阶段 ≠ 可以擅自上云同步、账号、Tauri/Rust 等。
+- Web/PWA 下手机 / 平板 / PC **三形态体验**属于建设范围（见 `qingyue-three-form-factors`），必须按专业方案兼顾，不得只修单端。
 
 ## 合规与工具安装
 
@@ -24,7 +31,7 @@ alwaysApply: true
 - **主交付面：Web / PWA**（浏览器 + 可安装 PWA）。
 - 平台差异必须走 `src/platform`（`files` / `tts` / `clipboard` / `env`）；业务与 Store **禁止**直接调用 `showDirectoryPicker`、`speechSynthesis`、`navigator.clipboard` 等浏览器 API。
 - 桌面壳：**暂不推进 Tauri**（依赖 Rust）。若将来需要桌面封装，优先评估 **Electron 官方开源方案**，且须用户明确同意后再接入。
-- 移动壳（Capacitor 等）未启动前，不要提前大改移动专有 UI；预留 `PlatformKind` 即可。
+- 原生移动壳（Capacitor 等）未立项前：**不要提前做壳专有 UI/工程**；预留 `PlatformKind` 即可。这不限制 Web/PWA 上对手机/平板/PC 视口与触控的正式建设。
 - 书库语义分端：Web/桌面可为「IDB 小文件 + 文件夹引用」；移动将来为「导入到应用沙箱」——**不要强行三端同一套「关联文件夹」流程**。
 
 ## 数据与同步

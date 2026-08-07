@@ -336,6 +336,21 @@
   perspective: 2200px;
   overflow: hidden;
   background: var(--reader-bg, #f3ead3);
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+.reader-page[data-turn='scroll'] .reader-stage {
+  touch-action: pan-y;
+  overscroll-behavior-y: contain;
+}
+
+/* EPUB: never apply live curl-drag transform (breaks column metrics on all form factors) */
+.reader-stage.curl-drag .engine-host > .epub-reader {
+  transform: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+  will-change: auto !important;
 }
 
 /* 横滑 / 仿真：PDF 锁定为整页，禁止自由纵滑 */
@@ -343,12 +358,14 @@
 .pdf-pages[data-turn='curl'] {
   overflow-y: hidden !important;
   scroll-behavior: auto !important;
+  touch-action: none;
 }
 
 .txt-content[data-turn='slide'],
 .txt-content[data-turn='curl'] {
   overflow-y: hidden !important;
   scroll-behavior: auto !important;
+  touch-action: none;
 }
 
 .txt-content[data-turn='scroll'],

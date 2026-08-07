@@ -2,6 +2,7 @@ import { markRaw, nextTick, ref, shallowRef, type Ref } from 'vue'
 import { createEngine } from '@/engines/factory'
 import type { ReaderEngine } from '@/engines/types'
 import type { ContentTapEvent, SelectionCaptureEvent } from '@/engines/types'
+import type { ContentGestureEvent } from '@/engines/types'
 import { useBooksStore } from '@/stores/books'
 import { useSettingsStore } from '@/stores/settings'
 import { useStatsStore } from '@/stores/stats'
@@ -12,6 +13,7 @@ export function useReaderSession(opts: {
   host: Ref<HTMLElement | null>
   onWheel: (deltaY: number) => void
   onContentTap: (ev: ContentTapEvent) => void
+  onContentGesture: (ev: ContentGestureEvent) => void
   onSelection: (ev: SelectionCaptureEvent | null) => void
 }) {
   const books = useBooksStore()
@@ -90,6 +92,7 @@ export function useReaderSession(opts: {
       })
       eng.onWheel?.(opts.onWheel)
       eng.onContentTap?.(opts.onContentTap)
+      eng.onContentGesture?.(opts.onContentGesture)
       eng.onSelection?.(opts.onSelection)
       engine.value = markRaw(eng)
       toc.value = eng.getToc()
