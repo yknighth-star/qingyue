@@ -538,7 +538,7 @@
   width: 100%;
   max-width: none;
   border: 1px solid rgba(255, 255, 255, 0.06);
-  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .book-card[data-format='epub'] {
@@ -553,10 +553,31 @@
   --card-accent: #e07070;
 }
 
-.book-card:hover {
-  transform: translateY(-2px);
-  border-color: color-mix(in srgb, var(--card-accent) 55%, transparent);
-  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.32);
+@media (hover: hover) and (pointer: fine) {
+  .book-card {
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .book-card:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--card-accent) 55%, transparent);
+    box-shadow: 0 10px 22px rgba(0, 0, 0, 0.32);
+  }
+
+  .book-card:hover .cover img {
+    transform: scale(1.03);
+  }
+}
+
+.book-card.menu-open {
+  /* Freeze card while menu is open — blocks sticky-hover scale flicker on touch. */
+  transform: none;
+  z-index: 5;
+}
+
+.book-card.menu-open .cover img {
+  transform: none;
+  transition: none;
 }
 
 .book-card.favorite {
@@ -603,10 +624,9 @@
   height: 100%;
   object-fit: cover;
   transition: transform 0.28s ease;
-}
-
-.book-card:hover .cover img {
-  transform: scale(1.03);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  transform: translateZ(0);
 }
 
 .cover-fallback {
@@ -813,6 +833,10 @@
 /* Portaled to body + card-width fixed coords — no sideways overflow on phone grid. */
 .book-card-menu-portal {
   box-sizing: border-box;
+  /* Solid fill avoids see-through flash over cover compositing layers. */
+  background: #1c2330;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
 }
 
 .book-card-menu-meta {
@@ -865,6 +889,10 @@
 }
 
 @media (hover: none) {
+  .cover img {
+    transition: none;
+  }
+
   .fav-btn,
   .book-more-btn {
     opacity: 1;

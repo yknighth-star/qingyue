@@ -1,6 +1,6 @@
 import ePub, { type Book, type NavItem, type Rendition } from 'epubjs'
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
-import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH } from '@/utils/format'
+import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH, THEME_VARS } from '@/utils/format'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
 import {
@@ -368,7 +368,10 @@ export class EpubEngine implements ReaderEngine {
 
     this.normalizeChapterTitles(doc)
     this.containOverflowMedia(doc)
-    if (this.settings) this.applyTypographyToDocument(doc, this.settings)
+    if (this.settings) {
+      this.applyThemeColorsToDocument(doc, this.settings)
+      this.applyTypographyToDocument(doc, this.settings)
+    }
     this.syncDocTouchAction(doc)
 
     // Re-apply search marks when chapter iframe mounts / remounts
@@ -1000,13 +1003,21 @@ export class EpubEngine implements ReaderEngine {
   getSelectableText() {
     try {
       const contents = (
-        this.rendition as unknown as { getContents?: () => { window: Window }[] }
+        this.rendition as unknown as {
+          getContents?: () => { window: Window; document?: Document }[]
+        }
       )?.getContents?.()
       if (!contents?.length) return ''
-      return contents
-        .map((c) => c.window.document.body?.innerText || '')
-        .join('\n')
-        .trim()
+      const parts = contents.map((c) => {
+        const doc = c.document || c.window?.document
+        return (
+          doc?.body?.innerText ||
+          doc?.documentElement?.innerText ||
+          doc?.body?.textContent ||
+          ''
+        )
+      })
+      return parts.join('\n').replace(/\s+\n/g, '\n').trim()
     } catch {
       return ''
     }
@@ -1192,13 +1203,107 @@ html body h6 {
     }
   }
 
+  private themeColors(settings: ReaderSettings) {
+    const theme = effectiveTheme(settings)
+    const vars = THEME_VARS[theme]
+    return {
+      theme,
+      bg: vars['--reader-bg'],
+      fg: vars['--reader-fg'],
+    }
+  }
+
+  /**
+   * Beat publisher EPUB CSS (often dark/green body with light text) so iframe
+   * colors match the reader chrome theme on phone/tablet/PC.
+   */
+  private applyThemeColorsToDocument(doc: Document, settings: ReaderSettings) {
+    const { theme, bg, fg } = this.themeColors(settings)
+    const fp = `${theme}\0${bg}\0${fg}`
+    const root = doc.documentElement
+    const id = 'qingyue-theme'
+    let styleEl = doc.getElementById(id) as HTMLStyleElement | null
+    if (styleEl?.textContent && root.dataset.qyTheme === fp) return
+
+    if (!styleEl) {
+      styleEl = doc.createElement('style')
+      styleEl.id = id
+      ;(doc.head || root).appendChild(styleEl)
+    }
+
+    styleEl.textContent = `
+html {
+  background: ${bg} !important;
+  background-color: ${bg} !important;
+  color: ${fg} !important;
+}
+html body {
+  background: ${bg} !important;
+  background-color: ${bg} !important;
+  color: ${fg} !important;
+}
+html body p,
+html body div,
+html body li,
+html body td,
+html body th,
+html body blockquote,
+html body section,
+html body article,
+html body span,
+html body font,
+html body h1,
+html body h2,
+html body h3,
+html body h4,
+html body h5,
+html body h6,
+html body p[class],
+html body div[class],
+html body span[class],
+html body section[class],
+html body article[class] {
+  color: ${fg} !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+}
+html body a,
+html body a[class] {
+  color: ${fg} !important;
+}
+`.trim()
+
+    root.style.setProperty('background', bg, 'important')
+    root.style.setProperty('background-color', bg, 'important')
+    root.style.setProperty('color', fg, 'important')
+    const body = doc.body
+    if (body) {
+      body.style.setProperty('background', bg, 'important')
+      body.style.setProperty('background-color', bg, 'important')
+      body.style.setProperty('color', fg, 'important')
+    }
+    root.dataset.qyTheme = fp
+  }
+
+  private applyThemeColorsToAllContents(settings: ReaderSettings) {
+    if (!this.rendition) return
+    try {
+      const contents = (
+        this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+      ).getContents?.()
+      contents?.forEach((c) => {
+        if (c.document) this.applyThemeColorsToDocument(c.document, settings)
+      })
+    } catch {
+      /* */
+    }
+  }
+
   private applyThemeToRendition(settings: ReaderSettings) {
     if (!this.rendition) return
     this.clearInjectedThemeStyles()
-    const theme = effectiveTheme(settings)
-    const bg = theme === 'dark' ? '#12141a' : theme === 'green' ? '#c7e0c7' : theme === 'light' ? '#f7f7f5' : '#f3ead3'
-    const fg = theme === 'dark' ? '#e8e6e3' : '#3b2f2f'
-    // Books often set font-* on p/div with !important — body alone is not enough.
+    const { bg, fg } = this.themeColors(settings)
     const typeface = {
       'font-size': `${settings.fontSize}px !important`,
       'line-height': `${settings.lineHeight} !important`,
@@ -1224,13 +1329,17 @@ html body h6 {
         'overflow-x': 'hidden !important',
         'max-width': '100% !important',
         'box-sizing': 'border-box !important',
+        background: `${bg} !important`,
+        'background-color': `${bg} !important`,
+        color: `${fg} !important`,
       },
       '*, *::before, *::after': {
         'box-sizing': 'border-box !important',
       },
       body: {
-        background: bg,
-        color: fg,
+        background: `${bg} !important`,
+        'background-color': `${bg} !important`,
+        color: `${fg} !important`,
         ...typeface,
         margin: '0 !important',
         cursor: 'default !important',
@@ -1242,9 +1351,7 @@ html body h6 {
         width: '100% !important',
         'box-sizing': 'border-box !important',
         'word-wrap': 'break-word !important',
-        'overflow-wrap': 'break-word !important',
-        // Paginated: page margins live on .epub-reader padding (see engines.css).
-        // Dual spread: only spine-side inset is applied in applyTypographyToDocument.
+        'overflow-wrap': 'anywhere !important',
         ...(settings.pageTurn === 'scroll'
           ? { padding: `${settings.marginY}px ${settings.marginX}px !important` }
           : {
@@ -1254,14 +1361,16 @@ html body h6 {
               'padding-right': '0 !important',
             }),
       },
-      // Beat publisher p/div font rules (common in CN EPUBs)
       'body p, body div, body li, body td, body th, body blockquote, body section, body article':
         {
           ...typeface,
+          color: `${fg} !important`,
+          background: 'transparent !important',
+          'background-color': 'transparent !important',
         },
       'img, svg, video, canvas': {
         'max-width': '100% !important',
-        'height': 'auto !important',
+        height: 'auto !important',
         'object-fit': 'contain !important',
       },
       table: {
@@ -1281,6 +1390,7 @@ html body h6 {
       },
       'body p': {
         ...typeface,
+        color: `${fg} !important`,
         'margin-top': '0 !important',
         'margin-bottom': `${settings.paragraphGap}em !important`,
         'text-indent': `${settings.indent}em !important`,
@@ -1294,6 +1404,7 @@ html body h6 {
       },
       'h1, h2, h3, h4, h5, h6': {
         ...titleReset,
+        color: `${fg} !important`,
         'font-family': `${settings.fontFamily} !important`,
         'margin-top': '1.1em !important',
         'margin-bottom': '0.75em !important',
@@ -1305,6 +1416,7 @@ html body h6 {
       'p.title, p.titlepage, p.chapter, p.chapter-title, p.ctitle, p.center, .title, .chapter-title, .chapterTitle, .kindle-cn-title, .contents-title, [class*="title"], [class*="Title"], [class*="chapter-title"], [class*="Chapter"], [class*="CENTER"], [class*="center"]':
         {
           ...titleReset,
+          color: `${fg} !important`,
           'margin-bottom': `${Math.max(0.6, settings.paragraphGap)}em !important`,
         },
       'p[align="center"], p[align="CENTER"], p[align="right"], p[align="RIGHT"], div[align="center"], div[align="right"], h1[align], h2[align], h3[align]':
@@ -1313,8 +1425,10 @@ html body h6 {
         },
       a: {
         cursor: 'pointer !important',
+        color: `${fg} !important`,
       },
     })
+    this.applyThemeColorsToAllContents(settings)
   }
 
   /**

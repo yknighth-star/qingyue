@@ -68,6 +68,7 @@ export function useReaderTts(opts: {
     const value = (e.target as HTMLSelectElement).value
     void settingsStore.update({ ttsVoiceURI: value })
     settingsStore.settings.ttsVoiceURI = value
+    tts.unlockFromGesture()
     const sample = opts.getSpeakText().trim().slice(0, 40) || '你好，这是当前朗读音色的试听。'
     ttsSpeaking.value = true
     opts.flashStatus('试听新音色…')
@@ -86,16 +87,25 @@ export function useReaderTts(opts: {
   }
 
   function speakSelection() {
-    const text = opts.getSpeakText()
-    if (!text.trim()) {
+    if (typeof window !== 'undefined' && !window.speechSynthesis) {
+      opts.flashStatus('当前浏览器不支持朗读（Web Speech）')
+      return
+    }
+    tts.unlockFromGesture()
+    const text = opts.getSpeakText().trim()
+    if (!text) {
       opts.flashStatus('没有可朗读的内容，请先选中文字或打开有正文的页面')
       return
     }
+    const maxLen = window.matchMedia('(pointer: coarse)').matches ? 2500 : 8000
+    const payload = text.length > maxLen ? `${text.slice(0, maxLen)}…` : text
     ttsSpeaking.value = true
-    opts.flashStatus('正在朗读…')
-    tts.speak(text, ttsSpeakOpts(), () => {
+    opts.flashStatus(text.length > maxLen ? '正在朗读本页（已截取前段）…' : '正在朗读…')
+    tts.speak(payload, ttsSpeakOpts(), () => {
+      const still = tts.isSpeaking()
       ttsSpeaking.value = false
-      opts.flashStatus('朗读结束')
+      // Distinguish real end vs instant cancel/fail
+      if (!still) opts.flashStatus('朗读结束')
     })
   }
 
@@ -130,6 +140,7 @@ export function useReaderTts(opts: {
   }
 
   function onTtsPlayPointerDown() {
+    tts.unlockFromGesture()
     ttsLongPressFired = false
     if (ttsLongPressTimer) window.clearTimeout(ttsLongPressTimer)
     ttsLongPressTimer = window.setTimeout(() => {

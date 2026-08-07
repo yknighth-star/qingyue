@@ -10,6 +10,8 @@ export interface SpeakOptions {
 
 export interface TtsController {
   speak(text: string, opts?: SpeakOptions | number, onDone?: () => void): void
+  /** Call in the same user-gesture turn before speak() on mobile browsers. */
+  unlockFromGesture(): void
   stop(): void
   pause(): void
   resume(): void
@@ -127,6 +129,7 @@ export function createTts(): TtsController {
   let generation = 0
   let queueTimer: number | null = null
   let startTimer: number | null = null
+  let keepAliveTimer: number | null = null
 
   function clearTimers() {
     if (queueTimer != null) {
@@ -139,14 +142,63 @@ export function createTts(): TtsController {
     }
   }
 
+  function stopKeepAlive() {
+    if (keepAliveTimer != null) {
+      window.clearInterval(keepAliveTimer)
+      keepAliveTimer = null
+    }
+  }
+
+  /** Chrome (esp. Android) often stalls TTS mid-utterance — nudge resume. */
+  function startKeepAlive(gen: number) {
+    stopKeepAlive()
+    keepAliveTimer = window.setInterval(() => {
+      if (gen !== generation || !window.speechSynthesis) {
+        stopKeepAlive()
+        return
+      }
+      try {
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume()
+          return
+        }
+        if (window.speechSynthesis.speaking) {
+          window.speechSynthesis.pause()
+          window.speechSynthesis.resume()
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 9000)
+  }
+
+  /**
+   * Call inside a user gesture (click/tap). Must NOT cancel() — on Android Chrome
+   * a late cancel() kills the real utterance and TTS appears to stop immediately.
+   */
+  function unlockFromGesture() {
+    if (!window.speechSynthesis) return
+    try {
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume()
+      void window.speechSynthesis.getVoices()
+    } catch {
+      /* ignore */
+    }
+  }
+
   function hardStopSynth() {
     clearTimers()
+    stopKeepAlive()
     if (!window.speechSynthesis) return
     try {
       window.speechSynthesis.cancel()
     } catch {
       /* ignore */
     }
+  }
+
+  function isCoarsePointer() {
+    return typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
   }
 
   function speakChunk(
@@ -158,6 +210,8 @@ export function createTts(): TtsController {
       voiceURI?: string
       /** After a voice failure, speak with lang only */
       forceDefault?: boolean
+      /** Retry after cancel race (Android Chrome) */
+      afterCancelRetry?: boolean
     },
     gen: number,
     onChunkDone: (err?: boolean) => void,
@@ -171,11 +225,18 @@ export function createTts(): TtsController {
     u.rate = opts.rate
     u.pitch = opts.pitch
 
+    // Mobile: prefer local voices — cloud/neural often error immediately → "朗读结束"
     let usedVoice: SpeechSynthesisVoice | null = null
     if (!opts.forceDefault) {
       usedVoice = pickVoice(opts.voiceURI)
+      if (isCoarsePointer() && usedVoice && !usedVoice.localService) {
+        const local = window.speechSynthesis
+          .getVoices()
+          .filter((v) => v.localService && v.lang.toLowerCase().startsWith('zh'))
+          .sort((a, b) => voiceScore(b) - voiceScore(a))[0]
+        if (local) usedVoice = local
+      }
       if (usedVoice) {
-        // Assign voice only — setting lang alongside breaks some Chrome builds
         u.voice = usedVoice
       } else {
         u.lang = opts.lang
@@ -203,6 +264,15 @@ export function createTts(): TtsController {
       if (gen !== generation || settled) return
       const typ = (ev as SpeechSynthesisErrorEvent).error
       if (typ === 'interrupted' || typ === 'canceled') {
+        // cancel()→speak() race on Android: retry once instead of ending immediately
+        if (!opts.afterCancelRetry) {
+          settled = true
+          window.setTimeout(() => {
+            if (gen !== generation) return
+            speakChunk(chunk, { ...opts, afterCancelRetry: true }, gen, onChunkDone)
+          }, 100)
+          return
+        }
         done(true)
         return
       }
@@ -216,7 +286,6 @@ export function createTts(): TtsController {
     }
 
     try {
-      // Chromium can stay paused after cancel and then produce silence
       if (window.speechSynthesis.paused) window.speechSynthesis.resume()
       window.speechSynthesis.speak(u)
     } catch {
@@ -240,6 +309,7 @@ export function createTts(): TtsController {
       if (gen !== generation) return
       active = false
       clearTimers()
+      stopKeepAlive()
       onDone?.()
     }
 
@@ -271,6 +341,7 @@ export function createTts(): TtsController {
       })
     }
 
+    startKeepAlive(gen)
     next()
   }
 
@@ -312,11 +383,13 @@ export function createTts(): TtsController {
       speakQueue(chunks, opts, gen, onDone)
     }
 
-    // cancel() then immediate speak often drops audio on Chromium
+    // Desktop Chromium: brief gap after cancel avoids dropped audio.
+    // Mobile Chrome: MUST wait longer — cancel() is async and kills an immediate speak().
+    const delayMs = isCoarsePointer() ? 120 : 40
     startTimer = window.setTimeout(() => {
       startTimer = null
       start()
-    }, 40)
+    }, delayMs)
   }
 
   return {
@@ -325,6 +398,9 @@ export function createTts(): TtsController {
         typeof optsOrRate === 'number' ? { rate: optsOrRate } : optsOrRate || {}
       beginSpeak(text, opts, onDone)
     },
+
+    /** Must run in the same user-gesture turn as the tap that starts TTS. */
+    unlockFromGesture,
 
     stop() {
       generation += 1

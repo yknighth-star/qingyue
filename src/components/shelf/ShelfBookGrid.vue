@@ -45,7 +45,7 @@ function openBook(id: string) {
   emit('open', id)
 }
 
-/** Keep menu within the book card bounds (phone 3-col cards are narrow). */
+/** Keep menu inside the book card (width + vertical) on phone / tablet / PC. */
 function placeMenuNear(anchor: HTMLElement, menuEl?: HTMLElement | null) {
   const card = anchor.closest('.book-card') as HTMLElement | null
   const cardRect = card?.getBoundingClientRect()
@@ -64,14 +64,28 @@ function placeMenuNear(anchor: HTMLElement, menuEl?: HTMLElement | null) {
   }
 
   const estimatedH = menuEl?.offsetHeight || 120
-  // Prefer just above the ⋯ button — width stays card-tied, no sideways spill.
-  let top = btnRect.top - estimatedH - MENU_GAP
-  if (cardRect && top < cardRect.top + MENU_INSET) {
-    top = Math.max(cardRect.top + MENU_INSET, btnRect.top - estimatedH - MENU_GAP)
+  let top: number
+
+  if (cardRect && cardRect.height > 80) {
+    const cardTop = cardRect.top + MENU_INSET
+    const cardBottom = cardRect.bottom - MENU_INSET
+    // Prefer above ⋯ so the panel stays inside the card (PC was opening below → 越界).
+    const above = btnRect.top - estimatedH - MENU_GAP
+    if (above >= cardTop) {
+      top = above
+    } else {
+      // Not enough room above button: dock under card top (overlaps cover, still in-bounds).
+      top = cardTop
+    }
+    // Clamp so the menu bottom does not leave the card.
+    if (top + estimatedH > cardBottom) {
+      top = Math.max(cardTop, cardBottom - estimatedH)
+    }
+  } else {
+    const above = btnRect.top - estimatedH - MENU_GAP
+    top = above >= MENU_PAD ? above : btnRect.bottom + MENU_GAP
   }
-  if (top < MENU_PAD) {
-    top = Math.min(vh - estimatedH - MENU_PAD, btnRect.bottom + MENU_GAP)
-  }
+
   top = Math.max(MENU_PAD, Math.min(top, vh - MENU_PAD - 48))
 
   if (left + width > vw - MENU_PAD) {
@@ -97,12 +111,14 @@ function bookMoreBtn(id: string): HTMLElement | null {
 }
 
 async function openMenuFor(b: BookRecord, anchor?: HTMLElement | null) {
+  const el = anchor || bookMoreBtn(b.id)
+  // Place coords BEFORE mounting portal — avoids static→fixed flash that blinks covers.
+  if (el) placeMenuNear(el, null)
   menuId.value = b.id
   menuBook.value = b
   await nextTick()
-  const el = anchor || bookMoreBtn(b.id)
   const menuEl = document.querySelector('.book-card-menu-portal') as HTMLElement | null
-  if (el) placeMenuNear(el, menuEl)
+  if (el && menuEl) placeMenuNear(el, menuEl)
 }
 
 function toggleMenu(id: string, e?: Event) {

@@ -10,6 +10,8 @@
   caret-color: transparent;
   -webkit-user-select: text;
   user-select: text;
+  background: var(--reader-bg, #f3ead3);
+  color: var(--reader-fg, #3b2f2f);
 }
 
 /* Clip adjacent CSS columns hard — prevents glyph slivers on page edges. */
