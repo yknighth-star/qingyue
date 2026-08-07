@@ -295,6 +295,10 @@ mark.search-hit {
   box-sizing: border-box;
 }
 
+.pdf-pages[data-turn='scroll'] .pdf-page {
+  width: 100%;
+}
+
 .pdf-page.pdf-slot:not([data-filled='1']) {
   /* Placeholder keeps scroll geometry before canvas paints */
   background: color-mix(in srgb, var(--panel, #1e2433) 88%, #fff 12%);
@@ -307,6 +311,14 @@ mark.search-hit {
   width: auto;
   height: auto;
   image-rendering: auto;
+}
+
+/* Paged PDF: never let the generic canvas rule override engine pixel sizes. */
+.pdf-pages[data-turn='slide'] .pdf-page canvas,
+.pdf-pages[data-turn='curl'] .pdf-page canvas {
+  max-width: none;
+  width: unset;
+  height: unset;
 }
 
 .pdf-bookmark-flag {

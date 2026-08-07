@@ -98,16 +98,54 @@ export class PdfEngine implements ReaderEngine {
     void this.loadOutline()
   }
 
+  private isPagedTurn() {
+    return this.pageTurn !== 'scroll'
+  }
+
   private applyPageTurnChrome() {
     if (!this.pagesEl) return
     this.pagesEl.dataset.turn = this.pageTurn
+    if (this.container) this.container.dataset.turn = this.pageTurn
     if (this.pageTurn === 'scroll') {
       this.pagesEl.style.overflowY = 'auto'
       this.pagesEl.style.scrollBehavior = 'smooth'
     } else {
       // 横滑 / 仿真：整页锁定，不自由纵滑
+      this.pagesEl.style.overflow = 'hidden'
       this.pagesEl.style.overflowY = 'hidden'
       this.pagesEl.style.scrollBehavior = 'auto'
+      this.pagesEl.scrollTop = 0
+    }
+    this.syncActivePage()
+  }
+
+  /** Slide/curl: only the current page is visible; neighbors stay hidden for prefetch. */
+  private syncActivePage() {
+    if (!this.pagesEl) return
+    const paged = this.isPagedTurn()
+    const nodes = this.pagesEl.querySelectorAll('.pdf-page') as NodeListOf<HTMLElement>
+    for (const el of nodes) {
+      const n = Number(el.dataset.page)
+      const active = paged && n === this.page
+      if (active) {
+        el.dataset.active = '1'
+        el.style.display = 'block'
+        el.style.visibility = 'visible'
+        el.style.pointerEvents = ''
+        el.hidden = false
+      } else if (paged) {
+        delete el.dataset.active
+        el.style.display = 'none'
+        el.style.visibility = 'hidden'
+        el.style.pointerEvents = 'none'
+        el.hidden = true
+      } else {
+        delete el.dataset.active
+        el.style.display = ''
+        el.style.visibility = ''
+        el.style.pointerEvents = ''
+        el.hidden = false
+      }
     }
   }
 
@@ -510,24 +548,26 @@ export class PdfEngine implements ReaderEngine {
   }
 
   private getRenderMetrics(pageWidthAtScale1: number, pageHeightAtScale1: number) {
-    const padding = 24
+    const paged = this.isPagedTurn()
+    // Paged: use nearly full stage so the page fills the phone screen (contain).
+    const padX = paged ? 4 : 24
+    const padY = paged ? 4 : 24
     const containerWidth = Math.max(
-      200,
-      (this.pagesEl?.clientWidth || this.container?.clientWidth || 800) - padding,
+      160,
+      (this.pagesEl?.clientWidth || this.container?.clientWidth || 800) - padX,
     )
     const containerHeight = Math.max(
-      200,
-      (this.pagesEl?.clientHeight || this.container?.clientHeight || 600) - padding,
+      160,
+      (this.pagesEl?.clientHeight || this.container?.clientHeight || 600) - padY,
     )
     let fitScale = (containerWidth / Math.max(1, pageWidthAtScale1)) * this.userZoom
-    // 横滑 / 仿真：整页落入视口，一文件页 = 一屏
-    if (this.pageTurn !== 'scroll') {
+    if (paged) {
       const heightScale = (containerHeight / Math.max(1, pageHeightAtScale1)) * this.userZoom
       fitScale = Math.min(fitScale, heightScale)
     }
     const native = Math.max(window.devicePixelRatio || 1, 1)
     const dpr = Math.min(native, maxDprForQuality(this.pdfQuality))
-    return { fitScale: Math.max(0.35, fitScale), dpr }
+    return { fitScale: Math.max(0.35, fitScale), dpr, containerWidth, containerHeight }
   }
 
   private renderKey(fitScale: number, dpr: number) {
@@ -547,9 +587,13 @@ export class PdfEngine implements ReaderEngine {
     return this.pageHeights.get(pageNum) || this.defaultPageHeight
   }
 
-  /** Create/update one slot per page so document height stays stable while scrolling. */
+  /** Create/update page slots. Scroll keeps full spine; slide/curl keeps a ±1 window. */
   private ensureSlots() {
     if (!this.pdf || !this.pagesEl) return
+    if (this.isPagedTurn()) {
+      this.ensurePagedSlots()
+      return
+    }
     const total = this.pdf.numPages
     const existing = this.pagesEl.querySelectorAll('.pdf-page')
     if (existing.length === total) {
@@ -558,6 +602,11 @@ export class PdfEngine implements ReaderEngine {
         if (!(el as HTMLElement).dataset.filled) {
           ;(el as HTMLElement).style.minHeight = `${this.slotHeight(n)}px`
         }
+        // Clear paged-mode hide flags when returning to scroll.
+        ;(el as HTMLElement).hidden = false
+        ;(el as HTMLElement).style.display = ''
+        ;(el as HTMLElement).style.visibility = ''
+        delete (el as HTMLElement).dataset.active
       }
       return
     }
@@ -571,6 +620,43 @@ export class PdfEngine implements ReaderEngine {
     }
     this.pagesEl.innerHTML = ''
     this.pagesEl.appendChild(frag)
+  }
+
+  /** Only current ±1 pages in the DOM so a phone screen cannot show a page stack. */
+  private ensurePagedSlots() {
+    if (!this.pdf || !this.pagesEl) return
+    const total = this.pdf.numPages
+    const keep = new Set<number>([
+      this.page,
+      Math.max(1, this.page - 1),
+      Math.min(total, this.page + 1),
+    ])
+    const host = this.pagesEl
+    for (const el of [...host.querySelectorAll('.pdf-page')] as HTMLElement[]) {
+      const n = Number(el.dataset.page)
+      if (!keep.has(n)) {
+        if (el.dataset.filled === '1') {
+          this.pageHeights.set(n, el.offsetHeight || this.slotHeight(n))
+        }
+        el.remove()
+      }
+    }
+    const ordered = [...keep].sort((a, b) => a - b)
+    for (const n of ordered) {
+      let slot = host.querySelector(`[data-page="${n}"]`) as HTMLElement | null
+      if (!slot) {
+        slot = document.createElement('div')
+        slot.className = 'pdf-page pdf-slot'
+        slot.dataset.page = String(n)
+        slot.style.minHeight = `${this.slotHeight(n)}px`
+        const next = [...host.querySelectorAll('.pdf-page')].find(
+          (el) => Number((el as HTMLElement).dataset.page) > n,
+        ) as HTMLElement | undefined
+        if (next) host.insertBefore(slot, next)
+        else host.appendChild(slot)
+      }
+    }
+    this.syncActivePage()
   }
 
   private async getEmbeddedText(pageNum: number): Promise<string> {
@@ -685,17 +771,26 @@ export class PdfEngine implements ReaderEngine {
     const base = page.getViewport({ scale: 1 })
     const { fitScale, dpr } = this.getRenderMetrics(base.width, base.height)
     const viewport = page.getViewport({ scale: fitScale })
+    const cssW = Math.floor(viewport.width)
+    const cssH = Math.floor(viewport.height)
 
     wrap.innerHTML = ''
     wrap.dataset.filled = '1'
+    wrap.style.width = `${cssW}px`
+    wrap.style.maxWidth = 'none'
+    wrap.style.maxHeight = 'none'
+    wrap.style.height = `${cssH}px`
+    wrap.style.minHeight = `${cssH}px`
 
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
     const outputScale = dpr
     canvas.width = Math.floor(viewport.width * outputScale)
     canvas.height = Math.floor(viewport.height * outputScale)
-    canvas.style.width = `${Math.floor(viewport.width)}px`
-    canvas.style.height = `${Math.floor(viewport.height)}px`
+    canvas.style.width = `${cssW}px`
+    canvas.style.height = `${cssH}px`
+    canvas.style.maxWidth = 'none'
+    canvas.style.maxHeight = 'none'
     if (outputScale !== 1) {
       ctx.setTransform(outputScale, 0, 0, outputScale, 0, 0)
     }
@@ -707,11 +802,18 @@ export class PdfEngine implements ReaderEngine {
 
     await page.render({ canvasContext: ctx, viewport }).promise
 
-    const measured = Math.max(wrap.offsetHeight, Math.floor(viewport.height))
+    const measured = Math.max(wrap.offsetHeight, cssH)
     this.pageHeights.set(pageNum, measured)
     if (pageNum === 1) this.defaultPageHeight = measured
     wrap.style.minHeight = `${measured}px`
-    wrap.style.height = ''
+    if (this.pageTurn === 'scroll') {
+      wrap.style.height = ''
+      wrap.style.width = ''
+    } else {
+      // Keep explicit box so CSS max-width cannot shrink the page and reveal a neighbor.
+      wrap.style.height = `${cssH}px`
+      wrap.style.width = `${cssW}px`
+    }
 
     const gen = this.textLayerGen
     scheduleIdle(() => {
@@ -796,6 +898,14 @@ export class PdfEngine implements ReaderEngine {
         // Estimate slot height from page-1 viewport before painting
         this.defaultPageHeight = Math.max(200, Math.floor(base.height * fitScale))
         this.ensureSlots()
+        // Repaint when zoom / turn / fit metrics change.
+        for (const el of [...scroller.querySelectorAll('.pdf-page')] as HTMLElement[]) {
+          el.innerHTML = ''
+          el.dataset.filled = '0'
+          el.style.width = ''
+          el.style.height = ''
+          el.style.minHeight = `${this.defaultPageHeight}px`
+        }
       } else {
         this.ensureSlots()
       }
@@ -807,9 +917,14 @@ export class PdfEngine implements ReaderEngine {
         await this.renderPage(p)
       }
       this.evictOutside(start, end)
+      this.syncActivePage()
 
-      // Restore scroll after slot rebuild / height changes
-      if (force) scroller.scrollTop = prevTop
+      // Restore scroll after slot rebuild / height changes (scroll mode only).
+      if (this.pageTurn === 'scroll') {
+        if (force) scroller.scrollTop = prevTop
+      } else {
+        scroller.scrollTop = 0
+      }
     } finally {
       this.rendering = false
     }
@@ -827,6 +942,11 @@ export class PdfEngine implements ReaderEngine {
   private scrollToPage(pageNum: number, yRatio = 0) {
     const scroller = this.pagesEl
     if (!scroller) return
+    this.syncActivePage()
+    if (this.pageTurn !== 'scroll') {
+      scroller.scrollTop = 0
+      return
+    }
     const target = scroller.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null
     if (target) {
       const sRect = scroller.getBoundingClientRect()
@@ -845,6 +965,8 @@ export class PdfEngine implements ReaderEngine {
 
   private onScroll = () => {
     if (!this.pagesEl) return
+    // Paged modes do not free-scroll; ignore spurious scroll events.
+    if (this.pageTurn !== 'scroll') return
     const mid = this.pagesEl.scrollTop + this.pagesEl.clientHeight / 3
     const pages = [...this.pagesEl.querySelectorAll('.pdf-page')] as HTMLElement[]
     for (const el of pages) {

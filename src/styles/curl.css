@@ -518,12 +518,49 @@
   will-change: auto !important;
 }
 
-/* 横滑 / 仿真：PDF 锁定为整页，禁止自由纵滑 — 仍允许长按选字 */
+/* 横滑 / 仿真：PDF 一屏一页，尽量铺满视口（由 JS contain 计算尺寸） */
 .pdf-pages[data-turn='slide'],
-.pdf-pages[data-turn='curl'] {
-  overflow-y: hidden !important;
+.pdf-pages[data-turn='curl'],
+.pdf-reader[data-turn='slide'] .pdf-pages,
+.pdf-reader[data-turn='curl'] .pdf-pages {
+  overflow: hidden !important;
   scroll-behavior: auto !important;
   touch-action: manipulation;
+  padding: 0 !important;
+  gap: 0 !important;
+  justify-content: center !important;
+  align-items: center !important;
+}
+
+.pdf-pages[data-turn='slide'] .pdf-page,
+.pdf-pages[data-turn='curl'] .pdf-page,
+.pdf-reader[data-turn='slide'] .pdf-page,
+.pdf-reader[data-turn='curl'] .pdf-page {
+  display: none !important;
+  /* Size comes from inline styles set by pdfEngine — do not re-shrink here. */
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
+  flex-shrink: 0 !important;
+}
+
+.pdf-pages[data-turn='slide'] .pdf-page[data-active='1'],
+.pdf-pages[data-turn='curl'] .pdf-page[data-active='1'],
+.pdf-reader[data-turn='slide'] .pdf-page[data-active='1'],
+.pdf-reader[data-turn='curl'] .pdf-page[data-active='1'] {
+  display: block !important;
+  visibility: visible !important;
+}
+
+.pdf-pages[data-turn='slide'] .pdf-page canvas,
+.pdf-pages[data-turn='curl'] .pdf-page canvas,
+.pdf-reader[data-turn='slide'] .pdf-page canvas,
+.pdf-reader[data-turn='curl'] .pdf-page canvas {
+  /* Keep engine-assigned CSS pixel size; avoid width/height:auto override. */
+  max-width: none !important;
+  max-height: none !important;
+  display: block !important;
 }
 
 .txt-content[data-turn='slide'],

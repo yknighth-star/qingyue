@@ -11,3 +11,5 @@ public/ocr-runtime/
 public/tesseract/
 # language packs downloaded by scripts/fetch-tessdata.mjs (postinstall)
 public/tessdata/*.traineddata
+# Playwright CLI session dumps (page/console snapshots)
+.playwright-cli/
