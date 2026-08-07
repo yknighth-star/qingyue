@@ -16,7 +16,7 @@ import { createCurlGate, createMarkSurface, createSearchHighlightState } from '.
 import { injectCaretSuppression } from '@/utils/suppressCaret'
 import type { MarkHandleRects } from '@/utils/markSelect'
 import { searchEpubBook } from './epubSearch'
-import { revokeFontUrlCache, remapBookCssFonts, rewriteEpubFontUrls, rewriteHtmlFontUrls } from './epubFontUrls'
+import { revokeFontUrlCache, remapBookCssFonts, rewriteEpubFontUrls } from './epubFontUrls'
 
 type ContentsDoc = {
   document: Document
@@ -89,8 +89,11 @@ export class EpubEngine implements ReaderEngine {
     await this.book.opened
     await this.book.ready
     // Rewrite font urls inside CSS blobs BEFORE first iframe paint (avoids blocked:other).
+    // Do NOT register a serialize hook: epub.js runs serialize hooks in parallel and
+    // whatever finishes last wins — overwriting blob image replacements with relative
+    // paths (broken <img> in about:srcdoc). Fonts are fixed via remapBookCssFonts +
+    // rewriteDocFonts after mount.
     await remapBookCssFonts(this.book, this.fontUrlCache)
-    this.registerFontSerializeHook()
     this.spineLength = (this.book.spine as { length?: number }).length || 1
     const nav = this.book.navigation
     this.toc = flattenNav(nav?.toc || [])
@@ -1243,23 +1246,6 @@ html body h6 {
     }
   }
 
-  private registerFontSerializeHook() {
-    const spine = this.book?.spine as unknown as {
-      hooks?: { serialize?: { register: (fn: (output: string, section: { output: string }) => Promise<void>) => void } }
-    } | null
-    const hook = spine?.hooks?.serialize
-    if (!hook) return
-    hook.register(async (output, section) => {
-      if (!this.book) return
-      try {
-        const next = await rewriteHtmlFontUrls(String(output ?? section.output ?? ''), this.book, this.fontUrlCache)
-        section.output = next
-      } catch (err) {
-        console.warn('epub html font rewrite failed', err)
-      }
-    })
-  }
-
   private async rewriteDocFonts(doc: Document) {
     if (!this.book) return
     try {
@@ -1392,13 +1378,6 @@ html body :where(p, div, li, span, a, h1, h2, h3, h4, h5, h6, td, th, blockquote
 }
 html body :where(img, svg, video, canvas, picture, object, embed, iframe) {
   background-color: transparent !important;
-}
-html body :where(img, picture, video, canvas, object, embed) {
-  max-width: 100% !important;
-  height: auto !important;
-}
-html body svg {
-  max-width: 100% !important;
 }
 `.trim()
 
@@ -1664,7 +1643,6 @@ html body svg {
         },
       'img, picture, video, canvas': {
         'max-width': '100% !important',
-        height: 'auto !important',
         'background-color': 'transparent !important',
       },
       svg: {
@@ -1777,20 +1755,13 @@ html body svg {
     }
   }
 
-  /** Constrain wide bitmaps; never force SVG height:auto (collapses many Kindle figures to 0). */
+  /**
+   * Cap overflow only. Never strip width/height or force height:auto —
+   * that collapses many EPUB bitmaps to ~1×1 (verified by selftest-epub-images).
+   */
   private containOverflowMedia(doc: Document) {
-    doc.querySelectorAll('img, video, canvas, picture').forEach((node) => {
-      if (!(node instanceof HTMLElement)) return
-      node.style.setProperty('max-width', '100%', 'important')
-      node.style.setProperty('height', 'auto', 'important')
-      if (node instanceof HTMLImageElement || node instanceof HTMLVideoElement) {
-        node.removeAttribute('width')
-        node.removeAttribute('height')
-      }
-    })
-    doc.querySelectorAll('svg').forEach((node) => {
-      if (!(node instanceof SVGElement)) return
-      // Cap width only — never height:auto / strip attrs (collapses Kindle SVG figures).
+    doc.querySelectorAll('img, video, canvas, picture, svg').forEach((node) => {
+      if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) return
       node.style.setProperty('max-width', '100%', 'important')
     })
 

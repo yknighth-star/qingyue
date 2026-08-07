@@ -75,16 +75,18 @@ export async function rewriteEpubFontUrls(
   }
 
   for (const link of Array.from(doc.querySelectorAll('link[rel="stylesheet"]'))) {
-    const href = (link as HTMLLinkElement).href
+    const el = link as HTMLLinkElement
+    const href = el.href
     if (!href || !(href.startsWith('blob:') || href.startsWith('data:'))) continue
     try {
       const text = await fetch(href).then((r) => r.text())
       if (!containsRelativeFontUrl(text) && !FONT_EXT_RE.test(text)) continue
       const next = neutralizeRelativeFonts(await rewriteCssText(text, book, cache, href))
-      const style = doc.createElement('style')
-      style.setAttribute('data-qy-font-fix', '1')
-      style.textContent = next
-      link.replaceWith(style)
+      // Keep <link> (do not replace with <style>): inlining changes CSS base URI and
+      // can break relative/illustration urls that still depend on stylesheet resolution.
+      const fresh = URL.createObjectURL(new Blob([next], { type: 'text/css' }))
+      cache.set(`css-dom:${href}`, fresh)
+      el.href = fresh
     } catch {
       /* */
     }

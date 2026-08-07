@@ -15,13 +15,11 @@ import { selectionRectFromSel } from '@/utils/selectionToolbar'
 import { highlightAnnotInRoot } from '@/utils/domHighlight'
 import { isSparseText, recognizeImage } from '@/utils/offlineOcr'
 import { compactCjkGaps, indexOfFlexible } from '@/utils/searchText'
+import { PDF_WORKER_SRC } from '@/utils/pdfWorker'
 import type { MarkHandleRects } from '@/utils/markSelect'
 
-/**
- * Same-origin worker (copied to dist/public by vite plugin).
- * Avoids CDN latency on mobile networks.
- */
-pdfjs.GlobalWorkerOptions.workerSrc = `${import.meta.env.BASE_URL}pdf.worker.min.mjs`
+/** Same-origin worker via Vite `?url` (dev + build). */
+pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER_SRC
 
 export class PdfEngine implements ReaderEngine {
   readonly capabilities = PDF_ENGINE_CAPABILITIES

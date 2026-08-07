@@ -2,6 +2,7 @@ import JSZip from 'jszip'
 import type { BookFormat } from '@/types'
 import { normalizeAuthor } from '@/utils/author'
 import { sanitizeMetaTitle } from '@/utils/bookMeta'
+import { PDF_WORKER_SRC } from '@/utils/pdfWorker'
 
 export interface MetaResult {
   title?: string
@@ -39,7 +40,7 @@ async function extractTxtMeta(file: Blob): Promise<MetaResult> {
 
 async function extractPdfMeta(file: Blob): Promise<MetaResult> {
   const pdfjs = await import('pdfjs-dist')
-  pdfjs.GlobalWorkerOptions.workerSrc = `${import.meta.env.BASE_URL}pdf.worker.min.mjs`
+  pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER_SRC
   const data = new Uint8Array(await file.arrayBuffer())
   const pdf = await pdfjs.getDocument({ data, disableAutoFetch: true, disableStream: true }).promise
   try {

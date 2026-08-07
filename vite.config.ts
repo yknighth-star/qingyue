@@ -62,8 +62,22 @@ function staticAssetsPlugin(): Plugin {
       // Always serve OCR runtime from node_modules — publicDir watch can miss
       // gitignored / late-created folders and fall through to index.html.
       server.middlewares.use((req: IncomingMessage, res: ServerResponse, next) => {
-        const raw = req.url?.split('?')[0] || ''
-        const pathname = decodeURIComponent(raw)
+        const rawUrl = req.url || ''
+        const qIdx = rawUrl.indexOf('?')
+        const pathname = decodeURIComponent(qIdx >= 0 ? rawUrl.slice(0, qIdx) : rawUrl)
+        const query = qIdx >= 0 ? rawUrl.slice(qIdx + 1) : ''
+
+        // Plain Worker fetches only — never intercept Vite `?url` / `?import` transforms.
+        if (
+          (pathname.endsWith('/pdf.worker.min.mjs') || pathname === '/pdf.worker.min.mjs') &&
+          !query
+        ) {
+          if (existsSync(pdfWorkerSrc)) {
+            sendFile(res, pdfWorkerSrc, 'text/javascript; charset=utf-8')
+            return
+          }
+        }
+
         const marker = '/ocr-runtime/'
         const idx = pathname.lastIndexOf(marker)
         if (idx < 0) return next()
