@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import type { FormatFilter, ProgressFilter, ShelfSort } from '@/types'
 import { useShelfActions, useShelfLifecycle } from '@/composables/useShelfActions'
 import ShelfToolbar from '@/components/shelf/ShelfToolbar.vue'
+import ShelfSearchSheet from '@/components/shelf/ShelfSearchSheet.vue'
 import ShelfBookGrid from '@/components/shelf/ShelfBookGrid.vue'
 import ShelfEditDialog from '@/components/shelf/ShelfEditDialog.vue'
 
@@ -71,13 +72,13 @@ function toggleMenu() {
   menuOpen.value = !menuOpen.value
 }
 
-function openSearch() {
-  menuOpen.value = false
-  searchOpen.value = true
-}
-
 function closeSearch() {
   searchOpen.value = false
+}
+
+function toggleSearch() {
+  menuOpen.value = false
+  searchOpen.value = !searchOpen.value
 }
 
 function triggerImport() {
@@ -160,9 +161,10 @@ onUnmounted(() => {
         type="button"
         class="shelf-icon-btn shelf-mobile-only"
         :class="{ active: searchOpen || hasActiveNarrow }"
-        title="搜索与筛选"
-        aria-label="搜索与筛选"
-        @click="openSearch"
+        title="搜索"
+        aria-label="搜索"
+        :aria-expanded="searchOpen"
+        @click="toggleSearch"
       >
         <span class="shelf-icon-search" aria-hidden="true" />
         <span v-if="hasActiveNarrow" class="shelf-icon-dot" />
@@ -246,21 +248,15 @@ onUnmounted(() => {
       :sort-options="sortOptions"
     />
 
-    <div v-if="searchOpen" class="shelf-search-sheet" @keydown.escape="closeSearch">
-      <div class="shelf-search-sheet-head">
-        <strong>搜索与筛选</strong>
-        <button type="button" class="btn ghost" @click="closeSearch">完成</button>
-      </div>
-      <ShelfToolbar
-        force-show
-        :format-options="formatOptions"
-        :progress-options="progressOptions"
-        :sort-options="sortOptions"
-      />
-      <p v-if="hasActiveNarrow" class="shelf-search-sheet-hint">
-        <button type="button" class="btn ghost" @click="clearNarrowFilters">清除筛选</button>
-      </p>
-    </div>
+    <ShelfSearchSheet
+      v-if="searchOpen"
+      :format-options="formatOptions"
+      :progress-options="progressOptions"
+      :sort-options="sortOptions"
+      :has-active-narrow="hasActiveNarrow"
+      @close="closeSearch"
+      @clear="clearNarrowFilters"
+    />
 
     <div v-if="!books.books.length" class="empty">
       <h2>书架还是空的</h2>

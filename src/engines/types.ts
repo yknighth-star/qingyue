@@ -9,7 +9,8 @@ export interface ContentTapEvent {
   hasSelection?: boolean
 }
 
-export type ContentGesturePhase = 'start' | 'move' | 'end' | 'cancel'
+export type ContentGesturePhase = 'start' | 'move' | 'end' | 'cancel' | 'longpress'
+
 
 /** Pointer gesture inside content (including EPUB iframe), coords in parent viewport. */
 export interface ContentGestureEvent {
@@ -56,6 +57,21 @@ export const PDF_ENGINE_CAPABILITIES: EngineCapabilities = {
   offlineOcr: true,
 }
 
+/** How page / pageCount were derived for chrome display. */
+export type PageCountMode = 'exact' | 'estimate' | 'chapter'
+
+/** Reading position reported by engines to the shell. */
+export interface ReadingProgress {
+  locator: Locator
+  percent: number
+  /** 1-based current page when known */
+  page?: number
+  /** Total pages when known */
+  pageCount?: number
+  /** exact = PDF; estimate = EPUB locations / TXT; chapter = section-local only */
+  pageMode?: PageCountMode
+}
+
 export interface SearchOptions {
   /** Run offline OCR on sparse/empty pages before matching. */
   ocr?: boolean
@@ -78,7 +94,7 @@ export interface ReaderEngine {
   toggleAutoScrollPause?(): 'paused' | 'running' | null
   isAutoScrollPaused?(): boolean
   getToc(): TocItem[]
-  getProgress(): { locator: Locator; percent: number }
+  getProgress(): ReadingProgress
   goTo(locator: Locator): Promise<void> | void
   /** Jump roughly by reading progress 0–100 */
   goToPercent(percent: number): Promise<void> | void
@@ -90,7 +106,7 @@ export interface ReaderEngine {
   /** Temporarily highlight search matches in the current view; pass null/'' to clear. */
   highlightSearch(query: string | null): void
   getSelectableText(): string
-  onProgress(cb: (p: { locator: Locator; percent: number }) => void): void
+  onProgress(cb: (p: ReadingProgress) => void): void
   /** Wheel over content (including EPUB iframe). deltaY > 0 means scroll down. */
   onWheel(cb: (deltaY: number) => void): void
   /** Click/tap inside content area (including EPUB iframe). */
@@ -102,6 +118,28 @@ export interface ReaderEngine {
   onContentGesture(cb: (e: ContentGestureEvent) => void): void
   /** Text selection ready (including EPUB iframe mouseup). */
   onSelection(cb: (e: SelectionCaptureEvent | null) => void): void
+  /**
+   * 划线模式：关闭翻页手势抢占，放开原生拖选。
+   * 由阅读器在长按进入 / 关闭工具条时调用。
+   */
+  setSelectMode?(active: boolean): void
+  /** Clear native text selection in host / iframe documents. */
+  clearNativeSelection?(): void
+  /**
+   * 划线模式自建拖选（对齐华为阅读：拖选 + 两端手柄），坐标为父页面视口。
+   */
+  markDrag?(
+    phase: 'start' | 'move' | 'end',
+    clientX: number,
+    clientY: number,
+  ): import('@/utils/markSelect').MarkHandleRects | null
+  markHandle?(
+    phase: 'start' | 'move' | 'end',
+    which: 'start' | 'end',
+    clientX: number,
+    clientY: number,
+  ): import('@/utils/markSelect').MarkHandleRects | null
+  getMarkHandleRects?(): import('@/utils/markSelect').MarkHandleRects | null
   applyAnnotations(annots: AnnotationRecord[]): void
   captureSelection(): { text: string; locator: Locator; rect?: SelectionCaptureEvent['rect'] } | null
 }

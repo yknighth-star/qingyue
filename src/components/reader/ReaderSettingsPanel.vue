@@ -21,6 +21,7 @@ const props = defineProps<{
   /** 用于定时深色文案刷新 */
   themeTick?: number
   viewportWide?: boolean
+  sheet?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -67,7 +68,8 @@ function setAutoScrollPreset(speed: number) {
 </script>
 
 <template>
-  <aside class="panel" :class="{ open }">
+  <aside class="panel panel-sheet-tall" :class="{ open, 'panel-sheet': sheet }">
+    <div v-if="sheet" class="panel-sheet-handle" aria-hidden="true" />
     <div class="panel-header">
       <strong>排版</strong>
       <button class="btn ghost" @click="emit('close')">关闭</button>

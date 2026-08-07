@@ -1,16 +1,33 @@
 import type { PageTurnMode } from '@/types'
-import { runDualLayerCurl } from '@/utils/pageCurl'
+import { runDualLayerCurl, runDualLayerLiteCurl } from '@/utils/pageCurl'
+import { runEpubSoftTurn } from '@/utils/pageEpubTurn'
 import { runDualLayerSlide } from '@/utils/pageSlide'
 import { resolveTurnAnim, resolveTurnProfile, type TurnProfile } from '@/utils/turnProfile'
 
 /**
  * Shared page-turn animation gate for TXT / PDF / EPUB.
  * - scroll: no chrome animation
- * - slide / curl / lite-curl: dual-layer (EPUB = ghost-only inside utils)
- * Never skip animation for EPUB — only avoid transforming the live surface.
+ * - slide: dual-layer translate
+ * - lite-curl / curl: peel animations (never silently equal to slide)
+ * - EPUB: dual-buffer peel/slide (front text plate; live surface hidden during swap)
  */
 export function createCurlGate() {
   let busy = false
+  const listeners = new Set<(busy: boolean) => void>()
+
+  function setBusy(next: boolean) {
+    busy = next
+    listeners.forEach((fn) => fn(busy))
+  }
+
+  function onBusyChange(cb: (busy: boolean) => void) {
+    listeners.add(cb)
+    return () => listeners.delete(cb)
+  }
+
+  function isBusy() {
+    return busy
+  }
 
   async function run(
     pageTurn: PageTurnMode,
@@ -27,19 +44,26 @@ export function createCurlGate() {
       return
     }
     if (busy) return
-    busy = true
+    setBusy(true)
     const el = container ?? null
     try {
-      // lite-curl: reliable horizontal transition on phone/tablet/coarse (avoid heavy 3D)
-      if (anim === 'slide' || anim === 'lite-curl') {
+      const isEpub = !!el?.classList.contains('epub-reader')
+      if (isEpub) {
+        const skin = anim === 'slide' ? 'slide' : 'curl'
+        await runEpubSoftTurn(el, dir, action, skin)
+        return
+      }
+      if (anim === 'slide') {
         await runDualLayerSlide(el, dir, action)
+      } else if (anim === 'lite-curl') {
+        await runDualLayerLiteCurl(el, dir, action)
       } else {
         await runDualLayerCurl(el, dir, action)
       }
     } finally {
-      busy = false
+      setBusy(false)
     }
   }
 
-  return { run }
+  return { run, isBusy, onBusyChange }
 }

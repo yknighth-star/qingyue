@@ -3,6 +3,7 @@ import { detectFormat, titleFromFilename } from '@/storage/types'
 import { highlightAnnotInRoot } from '@/utils/domHighlight'
 import { FULL_ENGINE_CAPABILITIES } from '@/engines/types'
 import { indexOfIgnoreCase } from '@/utils/searchText'
+import { formatPageLabel } from '@/utils/format'
 
 describe('storage helpers', () => {
   it('detects formats from filenames', () => {
@@ -63,6 +64,8 @@ describe('turn profile (phone / tablet / desktop)', () => {
     expect(resolveTurnAnim('scroll', phone)).toBe('none')
     expect(resolveTurnAnim('slide', phone)).toBe('slide')
     expect(resolveTurnAnim('curl', phone)).toBe('lite-curl')
+    // 仿真不得 silently 等于横滑
+    expect(resolveTurnAnim('curl', phone)).not.toBe(resolveTurnAnim('slide', phone))
   })
 })
 
@@ -135,5 +138,20 @@ describe('epub cover resolution', () => {
       </manifest>`
     const items = parseManifestItems(opf)
     expect(resolveEpubCoverHref(opf, items)).toBe('cover.png')
+  })
+})
+
+describe('page label', () => {
+  it('formats exact / estimate / chapter / percent fallback', () => {
+    expect(formatPageLabel({ percent: 24, page: 128, pageCount: 520, pageMode: 'exact' })).toBe(
+      '128 / 520',
+    )
+    expect(formatPageLabel({ percent: 10, page: 12, pageCount: 80, pageMode: 'estimate' })).toBe(
+      '约 12 / 80',
+    )
+    expect(formatPageLabel({ percent: 5, page: 2, pageCount: 9, pageMode: 'chapter' })).toBe(
+      '本节 2 / 9',
+    )
+    expect(formatPageLabel({ percent: 33 })).toBe('33%')
   })
 })

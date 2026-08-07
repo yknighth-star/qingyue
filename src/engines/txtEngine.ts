@@ -11,6 +11,7 @@ import {
 import { createCurlGate, createHostSelectionBridge, createSearchHighlightState } from './shared'
 import { suppressHostCaret } from '@/utils/suppressCaret'
 import { selectionRectFromSel } from '@/utils/selectionToolbar'
+import { createMarkDragController, type MarkDragController, type MarkHandleRects } from '@/utils/markSelect'
 
 export class TxtEngine implements ReaderEngine {
   readonly capabilities = FULL_ENGINE_CAPABILITIES
@@ -20,11 +21,12 @@ export class TxtEngine implements ReaderEngine {
   private container: HTMLElement | null = null
   private contentEl: HTMLElement | null = null
   private settings: ReaderSettings | null = null
-  private progressCb: ((p: { locator: Locator; percent: number }) => void) | null = null
+  private progressCb: ((p: import('@/engines/types').ReadingProgress) => void) | null = null
   private wheelCb: ((deltaY: number) => void) | null = null
   private scrollTimer: number | null = null
   private autoRaf = 0
   private pageTurn: PageTurnMode = 'slide'
+  private selectMode = false
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
   private readonly curl = createCurlGate()
   private readonly searchHl = createSearchHighlightState()
@@ -34,6 +36,17 @@ export class TxtEngine implements ReaderEngine {
     capture: () => this.captureSelection(),
     onEmit: (ev) => this.selectionCb?.(ev),
   })
+  private markDragCtl: MarkDragController | null = null
+
+  private getMarkDrag(): MarkDragController {
+    if (!this.markDragCtl) {
+      this.markDragCtl = createMarkDragController({
+        getDocs: () => [document],
+        getRoot: () => this.contentEl,
+      })
+    }
+    return this.markDragCtl
+  }
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -184,6 +197,7 @@ export class TxtEngine implements ReaderEngine {
     const offsetRatio = el && el.scrollHeight > el.clientHeight ? el.scrollTop / (el.scrollHeight - el.clientHeight) : 0
     const charOffset = Math.floor(ch.start + (ch.end - ch.start) * offsetRatio)
     const percent = this.text.length ? (charOffset / this.text.length) * 100 : 0
+    const pages = this.estimateTxtPages(el, ch, charOffset)
     return {
       locator: {
         type: 'txt' as const,
@@ -192,7 +206,34 @@ export class TxtEngine implements ReaderEngine {
         charOffset,
       },
       percent,
+      ...pages,
     }
+  }
+
+  /** Book-level page estimate from current chapter's page metrics (or char density). */
+  private estimateTxtPages(
+    el: HTMLElement | null,
+    ch: { start: number; end: number },
+    charOffset: number,
+  ): { page: number; pageCount: number; pageMode: 'estimate' } {
+    const textLen = Math.max(1, this.text.length)
+    const chLen = Math.max(1, ch.end - ch.start)
+    if (el && this.pageTurn !== 'scroll') {
+      const totalInCh = this.maxPageIndex(el) + 1
+      const curInCh = this.pageIndex(el) + 1
+      const charsPerPage = chLen / Math.max(1, totalInCh)
+      const pageCount = Math.max(1, Math.round(textLen / Math.max(1, charsPerPage)))
+      const before = Math.round(ch.start / Math.max(1, charsPerPage))
+      const page = Math.min(pageCount, Math.max(1, before + curInCh))
+      return { page, pageCount, pageMode: 'estimate' }
+    }
+    // Scroll / no layout yet: ~800 chars per "screen" as a stable estimate.
+    const charsPerPage = el && el.clientHeight > 0
+      ? Math.max(200, Math.round(chLen / Math.max(1, Math.ceil(el.scrollHeight / Math.max(1, el.clientHeight)))))
+      : 800
+    const pageCount = Math.max(1, Math.round(textLen / charsPerPage))
+    const page = Math.min(pageCount, Math.max(1, Math.round(charOffset / charsPerPage) + 1))
+    return { page, pageCount, pageMode: 'estimate' }
   }
 
   async goTo(locator: Locator) {
@@ -323,7 +364,7 @@ export class TxtEngine implements ReaderEngine {
     return hits
   }
 
-  onProgress(cb: (p: { locator: Locator; percent: number }) => void) {
+  onProgress(cb: (p: import('@/engines/types').ReadingProgress) => void) {
     this.progressCb = cb
   }
 
@@ -341,6 +382,61 @@ export class TxtEngine implements ReaderEngine {
 
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {
     this.selectionCb = cb
+  }
+
+  setSelectMode(active: boolean) {
+    this.selectMode = active
+    const el = this.contentEl
+    if (!el) return
+    el.classList.toggle('select-mode', active)
+    el.style.touchAction = active ? 'auto' : ''
+  }
+
+  clearNativeSelection() {
+    this.markDragCtl?.endDrag()
+    this.markDragCtl?.endHandle()
+    try {
+      window.getSelection()?.removeAllRanges()
+    } catch {
+      /* */
+    }
+  }
+
+  markDrag(phase: 'start' | 'move' | 'end', clientX: number, clientY: number): MarkHandleRects | null {
+    const ctl = this.getMarkDrag()
+    if (phase === 'start') {
+      ctl.beginDrag(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    if (phase === 'move') {
+      ctl.moveDrag(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    ctl.endDrag()
+    return ctl.getHandleRects()
+  }
+
+  markHandle(
+    phase: 'start' | 'move' | 'end',
+    which: 'start' | 'end',
+    clientX: number,
+    clientY: number,
+  ): MarkHandleRects | null {
+    const ctl = this.getMarkDrag()
+    if (phase === 'start') {
+      ctl.beginHandle(which)
+      return ctl.getHandleRects()
+    }
+    if (phase === 'move') {
+      ctl.moveHandle(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    ctl.endHandle()
+    return ctl.getHandleRects()
+  }
+
+  getMarkHandleRects(): MarkHandleRects | null {
+    return this.getMarkDrag().getHandleRects()
   }
 
   applyAnnotations(annots: AnnotationRecord[]) {

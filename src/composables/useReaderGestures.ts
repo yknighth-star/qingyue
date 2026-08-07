@@ -1,4 +1,4 @@
-import type { Ref } from 'vue'
+﻿import type { Ref } from 'vue'
 import type { ReaderEngine } from '@/engines/types'
 import type { ContentGestureEvent, ContentTapEvent } from '@/engines/types'
 import type { BookRecord, PageTurnMode } from '@/types'
@@ -14,9 +14,15 @@ export function useReaderGestures(opts: {
   turnProfile: () => TurnProfile
   shouldBlockTapActions: () => boolean
   hasTextSelection: () => boolean
+  /** 划线模式：长按进入后禁止翻页，直到关�?*/
+  markMode: Ref<boolean>
   selectionBar: Ref<unknown>
   getIgnoreTapUntil: () => number
   clearSelectionBar: () => void
+  onMarkBodyDown: (clientX: number, clientY: number) => boolean
+  onMarkBodyMove: (clientX: number, clientY: number) => void
+  onMarkBodyUp: () => void
+  onLongPress: () => void
   toggleChrome: () => void
   closePanel: () => void
 }) {
@@ -33,6 +39,15 @@ export function useReaderGestures(opts: {
       }
     | null = null
   let ignoreClickUntil = 0
+  let longPressTimer: number | null = null
+  const LONG_PRESS_MS = 320
+
+  function clearLongPressTimer() {
+    if (longPressTimer != null) {
+      window.clearTimeout(longPressTimer)
+      longPressTimer = null
+    }
+  }
 
   function isScrollMode() {
     return opts.pageTurn() === 'scroll'
@@ -47,13 +62,13 @@ export function useReaderGestures(opts: {
     return opts.book.value?.format === 'epub'
   }
 
-  function allowLiveCurlPreview() {
-    return opts.pageTurn() === 'curl' && opts.turnProfile().liveCurlPreview && !isEpub()
+  function inMarkMode() {
+    return opts.markMode.value
   }
 
   function turnByDelta(deltaY: number) {
     if (!opts.engine.value || opts.panel.value !== 'none') return
-    if (opts.shouldBlockTapActions()) return
+    if (opts.shouldBlockTapActions() || inMarkMode()) return
     if (isScrollMode()) return
     const now = Date.now()
     if (now < wheelLockUntil) return
@@ -76,7 +91,7 @@ export function useReaderGestures(opts: {
   }
 
   function onEdgeTurn(dir: 'prev' | 'next') {
-    if (opts.shouldBlockTapActions()) return
+    if (opts.shouldBlockTapActions() || inMarkMode()) return
     if (isScrollMode()) return
     if (dir === 'prev') void opts.engine.value?.prev()
     else void opts.engine.value?.next()
@@ -86,13 +101,20 @@ export function useReaderGestures(opts: {
     return opts.turnProfile().edgeWidth
   }
 
+  function dismissMarkOrChrome() {
+    // 划线模式只能点「关闭」退出；点空白不退出，便于继续改选区
+    if (inMarkMode()) return true
+    if (opts.selectionBar.value) {
+      opts.clearSelectionBar()
+      return true
+    }
+    return false
+  }
+
   function onStageClick(e: MouseEvent) {
     if (opts.panel.value !== 'none') return
     if (Date.now() < opts.getIgnoreTapUntil() || Date.now() < ignoreClickUntil) return
-    if (opts.selectionBar.value) {
-      opts.clearSelectionBar()
-      return
-    }
+    if (dismissMarkOrChrome()) return
     if (opts.hasTextSelection()) return
     const stage = opts.stageRef.value
     if (!stage) return
@@ -119,10 +141,7 @@ export function useReaderGestures(opts: {
     }
     if (ev.isLink) return
     if (ev.hasSelection || Date.now() < opts.getIgnoreTapUntil() || Date.now() < ignoreClickUntil) return
-    if (opts.selectionBar.value) {
-      opts.clearSelectionBar()
-      return
-    }
+    if (dismissMarkOrChrome()) return
     if (opts.hasTextSelection()) return
     const stage = opts.stageRef.value
     if (!stage) {
@@ -147,26 +166,59 @@ export function useReaderGestures(opts: {
     opts.toggleChrome()
   }
 
-  function clearCurlDragPreview() {
+  function clearDragPreview() {
     const stage = opts.stageRef.value
     if (!stage) return
-    stage.classList.remove('curl-drag', 'curl-drag-next', 'curl-drag-prev')
+    stage.classList.remove(
+      'curl-drag',
+      'curl-drag-next',
+      'curl-drag-prev',
+      'slide-drag',
+      'slide-drag-next',
+      'slide-drag-prev',
+    )
     stage.style.removeProperty('--curl-drag')
+    stage.style.removeProperty('--slide-drag')
   }
 
   function applyCurlDragPreview(dir: 'next' | 'prev', progress: number) {
     if (!allowLiveCurlPreview()) return
     const stage = opts.stageRef.value
     if (!stage) return
+    clearDragPreview()
     const p = Math.min(1, Math.max(0, progress))
     stage.classList.add('curl-drag', dir === 'next' ? 'curl-drag-next' : 'curl-drag-prev')
-    stage.classList.remove(dir === 'next' ? 'curl-drag-prev' : 'curl-drag-next')
     stage.style.setProperty('--curl-drag', String(p))
+  }
+
+  function applySlideDragPreview(dir: 'next' | 'prev', progress: number) {
+    if (!allowLiveSlidePreview()) return
+    const stage = opts.stageRef.value
+    if (!stage) return
+    clearDragPreview()
+    const p = Math.min(1, Math.max(0, progress))
+    stage.classList.add('slide-drag', dir === 'next' ? 'slide-drag-next' : 'slide-drag-prev')
+    stage.style.setProperty('--slide-drag', String(p))
+  }
+
+  function applyDragPreview(dir: 'next' | 'prev', progress: number) {
+    if (opts.pageTurn() === 'curl') applyCurlDragPreview(dir, progress)
+    else if (opts.pageTurn() === 'slide') applySlideDragPreview(dir, progress)
+  }
+
+  function allowLiveCurlPreview() {
+    // Curl follow-finger for TXT/PDF (incl. phone lite); never transform EPUB live surface
+    return opts.pageTurn() === 'curl' && !isEpub()
+  }
+
+  function allowLiveSlidePreview() {
+    return opts.pageTurn() === 'slide' && !isEpub()
   }
 
   function beginSwipe(pointerId: number, clientX: number, clientY: number) {
     if (!isPagedMode() || opts.panel.value !== 'none') return
-    if (opts.shouldBlockTapActions() || opts.hasTextSelection()) return
+    if (inMarkMode() || opts.shouldBlockTapActions() || opts.hasTextSelection()) return
+    clearLongPressTimer()
     swipe = {
       id: pointerId,
       x0: clientX,
@@ -176,33 +228,86 @@ export function useReaderGestures(opts: {
       lastX: clientX,
       lastY: clientY,
     }
+    longPressTimer = window.setTimeout(() => {
+      longPressTimer = null
+      if (swipe && swipe.id === pointerId && !swipe.dragging) {
+        const x = swipe.x0
+        const y = swipe.y0
+        swipe = null
+        clearDragPreview()
+        opts.onLongPress()
+        opts.onMarkBodyDown(x, y)
+      }
+    }, LONG_PRESS_MS)
   }
 
-  function moveSwipe(pointerId: number, clientX: number, clientY: number, prevent?: () => void) {
+  function moveSwipe(
+    pointerId: number,
+    clientX: number,
+    clientY: number,
+    optsMove?: { prevent?: () => void; capture?: () => void },
+  ) {
+    if (inMarkMode()) {
+      clearLongPressTimer()
+      swipe = null
+      clearDragPreview()
+      return
+    }
     if (!swipe || swipe.id !== pointerId) return
+    if (opts.hasTextSelection()) {
+      clearLongPressTimer()
+      const x = swipe.x0
+      const y = swipe.y0
+      swipe = null
+      clearDragPreview()
+      opts.onLongPress()
+      opts.onMarkBodyDown(x, y)
+      opts.onMarkBodyMove(clientX, clientY)
+      return
+    }
     swipe.lastX = clientX
     swipe.lastY = clientY
     const dx = clientX - swipe.x0
     const dy = clientY - swipe.y0
+    const held = Date.now() - swipe.t0
     if (!swipe.dragging) {
-      if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return
-      if (Math.abs(dy) > Math.abs(dx) * 1.15) {
+      if (held >= LONG_PRESS_MS) {
+        clearLongPressTimer()
+        const x = swipe.x0
+        const y = swipe.y0
         swipe = null
-        clearCurlDragPreview()
+        clearDragPreview()
+        opts.onLongPress()
+        opts.onMarkBodyDown(x, y)
+        opts.onMarkBodyMove(clientX, clientY)
         return
       }
+      if (Math.abs(dx) < 28 && Math.abs(dy) < 28) return
+      if (Math.abs(dy) > Math.abs(dx) * 1.05) {
+        clearLongPressTimer()
+        swipe = null
+        clearDragPreview()
+        return
+      }
+      if (Math.abs(dx) < Math.abs(dy) * 1.35) {
+        clearLongPressTimer()
+        swipe = null
+        clearDragPreview()
+        return
+      }
+      clearLongPressTimer()
       swipe.dragging = true
+      optsMove?.capture?.()
     }
-    prevent?.()
-    if (allowLiveCurlPreview()) {
-      const w = opts.stageRef.value?.clientWidth || 320
-      if (dx < 0) applyCurlDragPreview('next', Math.min(1, -dx / (w * 0.55)))
-      else applyCurlDragPreview('prev', Math.min(1, dx / (w * 0.55)))
-    }
+    optsMove?.prevent?.()
+    const w = opts.stageRef.value?.clientWidth || 320
+    if (dx < 0) applyDragPreview('next', Math.min(1, -dx / (w * 0.55)))
+    else applyDragPreview('prev', Math.min(1, dx / (w * 0.55)))
   }
 
   function endSwipe(pointerId: number, clientX?: number, clientY?: number) {
     if (!swipe || swipe.id !== pointerId) return
+    clearLongPressTimer()
     const x = clientX ?? swipe.lastX
     const y = clientY ?? swipe.lastY
     const dx = x - swipe.x0
@@ -210,8 +315,8 @@ export function useReaderGestures(opts: {
     const dt = Date.now() - swipe.t0
     const wasDrag = swipe.dragging
     swipe = null
-    clearCurlDragPreview()
-    if (!wasDrag || !isPagedMode()) return
+    clearDragPreview()
+    if (!wasDrag || !isPagedMode() || inMarkMode()) return
     const profile = opts.turnProfile()
     if (Math.abs(dx) < profile.swipeMinPx || Math.abs(dx) < Math.abs(dy) * 1.2) return
     const w = opts.stageRef.value?.clientWidth || 320
@@ -226,39 +331,86 @@ export function useReaderGestures(opts: {
 
   function cancelSwipe(pointerId: number) {
     if (!swipe || swipe.id !== pointerId) return
+    clearLongPressTimer()
     swipe = null
-    clearCurlDragPreview()
+    clearDragPreview()
   }
 
   function onStagePointerDown(e: PointerEvent) {
+    if (inMarkMode()) {
+      const t = e.target as HTMLElement | null
+      if (t?.closest?.('.mark-handle, .selection-bar, .mark-mode-hint, .reader-chrome, .panel, button, a'))
+        return
+      opts.onMarkBodyDown(e.clientX, e.clientY)
+      try {
+        opts.stageRef.value?.setPointerCapture?.(e.pointerId)
+      } catch {
+        /* */
+      }
+      return
+    }
     if (!isPagedMode() || opts.panel.value !== 'none') return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (opts.shouldBlockTapActions() || opts.hasTextSelection()) return
     const t = e.target as HTMLElement | null
-    if (t?.closest?.('button, a, input, textarea, .reader-chrome, .panel, .dict-popup')) return
-    // Edge zones: allow swipe; clicks still handled via @click on zones / stage
+    if (t?.closest?.('button, a, input, textarea, .reader-chrome, .panel, .dict-popup, .selection-bar, .mark-mode-hint'))
+      return
     beginSwipe(e.pointerId, e.clientX, e.clientY)
-    try {
-      opts.stageRef.value?.setPointerCapture?.(e.pointerId)
-    } catch {
-      /* */
-    }
   }
 
   function onStagePointerMove(e: PointerEvent) {
-    moveSwipe(e.pointerId, e.clientX, e.clientY, () => e.preventDefault())
+    if (inMarkMode()) {
+      opts.onMarkBodyMove(e.clientX, e.clientY)
+      return
+    }
+    moveSwipe(e.pointerId, e.clientX, e.clientY, {
+      prevent: () => e.preventDefault(),
+      capture: () => {
+        try {
+          opts.stageRef.value?.setPointerCapture?.(e.pointerId)
+        } catch {
+          /* */
+        }
+      },
+    })
   }
 
   function onStagePointerUp(e: PointerEvent) {
+    if (inMarkMode()) {
+      opts.onMarkBodyUp()
+      return
+    }
     endSwipe(e.pointerId, e.clientX, e.clientY)
   }
 
   function onStagePointerCancel(e: PointerEvent) {
+    if (inMarkMode()) {
+      opts.onMarkBodyUp()
+      return
+    }
     cancelSwipe(e.pointerId)
   }
 
-  /** Gestures forwarded from EPUB (and future) content documents. */
   function onContentGesture(ev: ContentGestureEvent) {
+    if (ev.phase === 'longpress') {
+      cancelSwipe(ev.pointerId)
+      opts.onLongPress()
+      opts.onMarkBodyDown(ev.clientX, ev.clientY)
+      return
+    }
+    if (inMarkMode()) {
+      if (ev.phase === 'start') {
+        opts.onMarkBodyDown(ev.clientX, ev.clientY)
+        return
+      }
+      if (ev.phase === 'move') {
+        opts.onMarkBodyMove(ev.clientX, ev.clientY)
+        return
+      }
+      opts.onMarkBodyUp()
+      cancelSwipe(ev.pointerId)
+      return
+    }
     if (ev.phase === 'start') {
       beginSwipe(ev.pointerId, ev.clientX, ev.clientY)
       return

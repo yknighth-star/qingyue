@@ -101,6 +101,8 @@ export interface ReaderSettings {
   autoDarkStart: number
   /** 定时深色结束小时 0–23（不含）；可跨午夜 */
   autoDarkEnd: number
+  /** 划线默认/上次使用的高亮色 */
+  highlightColor: string
 }
 
 export interface TocItem {
@@ -191,6 +193,7 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   appearanceMode: 'manual',
   autoDarkStart: 21,
   autoDarkEnd: 7,
+  highlightColor: HIGHLIGHT_COLORS[0],
 }
 
 export const MAX_IDB_FILE_BYTES = 200 * 1024 * 1024

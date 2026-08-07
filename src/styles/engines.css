@@ -12,12 +12,29 @@
   user-select: text;
 }
 
+/* Clip adjacent CSS columns hard — prevents glyph slivers on page edges. */
+.epub-reader {
+  contain: paint;
+  isolation: isolate;
+}
+
 /* epub.js stage */
 .epub-reader .epub-container {
   width: 100% !important;
   max-width: 100% !important;
   box-sizing: border-box !important;
   overflow-x: hidden !important;
+  contain: paint;
+}
+
+.epub-reader[data-turn='slide'] .epub-container,
+.epub-reader[data-turn='curl'] .epub-container,
+.epub-reader:not([data-turn]) .epub-container {
+  overflow-y: hidden !important;
+}
+
+.epub-reader[data-turn='scroll'] .epub-container {
+  overflow-y: auto !important;
 }
 
 /* 上下滑动：单栏，钳制宽度 */

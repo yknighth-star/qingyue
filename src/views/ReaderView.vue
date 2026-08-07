@@ -11,10 +11,11 @@ import { useReaderSearch } from '@/composables/useReaderSearch'
 import { useReaderSession } from '@/composables/useReaderSession'
 import { useReaderTts } from '@/composables/useReaderTts'
 import { useSelectionAnnot } from '@/composables/useSelectionAnnot'
-import { detectDevice, effectiveTheme, formatPercent, THEME_VARS } from '@/utils/format'
+import { detectDevice, effectiveTheme, formatPageLabel, formatPercent, THEME_VARS } from '@/utils/format'
 import { resolveTurnProfile } from '@/utils/turnProfile'
 import type { ContentGestureEvent, ContentTapEvent, SelectionCaptureEvent } from '@/engines/types'
 import type { TocItem } from '@/types'
+import { HIGHLIGHT_COLORS } from '@/types'
 import ReaderTocPanel from '@/components/reader/ReaderTocPanel.vue'
 import ReaderSearchPanel from '@/components/reader/ReaderSearchPanel.vue'
 import ReaderAnnotPanel from '@/components/reader/ReaderAnnotPanel.vue'
@@ -22,6 +23,7 @@ import ReaderSettingsPanel from '@/components/reader/ReaderSettingsPanel.vue'
 import ReaderTtsPanel from '@/components/reader/ReaderTtsPanel.vue'
 import ReaderMorePanel from '@/components/reader/ReaderMorePanel.vue'
 import ReaderSelectionBar from '@/components/reader/ReaderSelectionBar.vue'
+import ReaderMarkHandles from '@/components/reader/ReaderMarkHandles.vue'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
@@ -43,9 +45,9 @@ let themeTickTimer: number | null = null
 let systemColorMql: MediaQueryList | null = null
 
 const pageTurnHint: Record<string, string> = {
-  slide: '横滑：整页左右切换，支持左右滑、点两侧、滚轮翻页',
+  slide: '横滑：整页平移翻页，拖动时页面跟随手指滑动',
   scroll: '上下滑动：连续纵滑阅读，不整页跳转',
-  curl: '仿真：模拟纸书卷曲，左右拖或点两侧翻页',
+  curl: '仿真：纸页卷曲翻页（手机为轻量卷曲，仍区别于横滑）',
 }
 
 function flashStatus(msg: string) {
@@ -58,6 +60,8 @@ function flashStatus(msg: string) {
 
 const settings = computed(() => settingsStore.settings)
 const desktopUi = computed(() => isFinePointer.value || detectDevice() === 'desktop')
+/** Phone / tablet coarse: floating overlay chrome (ref apps). Desktop: bar chrome. */
+const floatChrome = computed(() => !desktopUi.value)
 const themeMode = computed(() => {
   void themeTick.value
   return effectiveTheme(settings.value)
@@ -93,6 +97,9 @@ const {
   book,
   engine,
   percent,
+  page,
+  pageCount,
+  pageMode,
   toc,
   opening,
   openHint,
@@ -111,16 +118,34 @@ const {
   onSelection: (ev) => selectionHandler.fn(ev),
 })
 
+const pageLabel = computed(() =>
+  formatPageLabel({
+    percent: percent.value,
+    page: page.value,
+    pageCount: pageCount.value,
+    pageMode: pageMode.value,
+  }),
+)
+
 const {
   annots,
+  markMode,
+  markHandles,
   selectionBar,
   dictResult,
   annotUiActive,
   getIgnoreTapUntil,
   clearSelectionBar,
+  onMarkBodyDown,
+  onMarkBodyMove,
+  onMarkBodyUp,
+  onMarkHandleStart,
+  onMarkHandleMove,
+  onMarkHandleEnd,
   hasTextSelection,
   shouldBlockTapActions,
   onEngineSelection,
+  onLongPress,
   onPointerUp,
   copySelection,
   loadAnnotations,
@@ -136,6 +161,10 @@ const {
   engine,
   flashStatus,
   closePanel,
+  getHighlightColor: () => settingsStore.settings.highlightColor || HIGHLIGHT_COLORS[0],
+  setHighlightColor: (c) => {
+    void settingsStore.update({ highlightColor: c })
+  },
 })
 
 const {
@@ -177,9 +206,7 @@ const {
 } = useReaderTts({
   flashStatus,
   getSpeakText,
-  clearSelectionBar: () => {
-    selectionBar.value = null
-  },
+  clearSelectionBar,
   openTtsPanel: () => openPanel('tts'),
 })
 
@@ -203,9 +230,14 @@ const {
   turnProfile: () => turnProfile.value,
   shouldBlockTapActions,
   hasTextSelection,
+  markMode,
   selectionBar,
   getIgnoreTapUntil,
   clearSelectionBar,
+  onMarkBodyDown,
+  onMarkBodyMove,
+  onMarkBodyUp,
+  onLongPress,
   toggleChrome,
   closePanel,
 })
@@ -250,7 +282,8 @@ watch(themeMode, () => {
 
 watch(chromeVisible, async () => {
   await nextTick()
-  // Stage flex size changes after chrome v-show; EPUB must re-paginate.
+  // Float chrome overlays the stage — no size change, skip epub resize (avoids shake).
+  if (!desktopUi.value) return
   requestAnimationFrame(() => engine.value?.resizeToContainer?.())
 })
 
@@ -446,7 +479,13 @@ onBeforeUnmount(() => {
   <div
     ref="pageRef"
     class="reader-page"
-    :class="{ desktop: desktopUi, 'annot-active': annotUiActive, 'panel-open': panel !== 'none' }"
+    :class="{
+      desktop: desktopUi,
+      'chrome-float': floatChrome,
+      'annot-active': annotUiActive,
+      'mark-mode': markMode,
+      'panel-open': panel !== 'none',
+    }"
     :data-turn="settings.pageTurn"
     :data-theme="themeMode"
     :data-device="turnProfile.device"
@@ -454,7 +493,12 @@ onBeforeUnmount(() => {
     :data-pointer="turnProfile.fine ? 'fine' : 'coarse'"
     :style="{ '--edge-width': `${turnProfile.edgeWidth * 100}%` }"
   >
-    <header v-show="chromeVisible" class="reader-chrome" @mousedown="clearUiSelection">
+    <header
+      v-if="!floatChrome"
+      v-show="chromeVisible"
+      class="reader-chrome"
+      @mousedown="clearUiSelection"
+    >
       <button class="btn ghost" @click="back">返回</button>
       <button
         type="button"
@@ -511,11 +555,37 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <div
+      v-if="markMode && !selectionBar"
+      class="mark-mode-hint"
+      role="status"
+      @click.stop
+      @pointerdown.stop
+    >
+      <span>划线中 · 拖选文字，拖绿点调范围</span>
+      <button type="button" class="btn ghost" @click="clearSelectionBar">关闭</button>
+    </div>
+
+    <ReaderMarkHandles
+      v-if="markMode && markHandles"
+      :start-x="markHandles.start.x"
+      :start-y="markHandles.start.y"
+      :start-h="markHandles.start.h"
+      :end-x="markHandles.end.x"
+      :end-y="markHandles.end.y"
+      :end-h="markHandles.end.h"
+      @handle-start="(which, e) => onMarkHandleStart(which, e.clientX, e.clientY)"
+      @handle-move="(e) => onMarkHandleMove(e.clientX, e.clientY)"
+      @handle-end="onMarkHandleEnd"
+    />
+
     <ReaderSelectionBar
       v-if="selectionBar"
       :left="selectionBar.left"
       :top="selectionBar.top"
       :show-highlights="engine?.capabilities.textHighlights !== false"
+      :selected-color="settings.highlightColor"
+      @select-color="(c) => settingsStore.update({ highlightColor: c })"
       @highlight="addHighlight"
       @copy="copySelection"
       @speak="speakSelection"
@@ -523,7 +593,12 @@ onBeforeUnmount(() => {
       @close="clearSelectionBar"
     />
 
-    <footer v-show="chromeVisible" class="reader-chrome bottom" @mousedown="clearUiSelection">
+    <footer
+      v-if="!floatChrome"
+      v-show="chromeVisible"
+      class="reader-chrome bottom"
+      @mousedown="clearUiSelection"
+    >
       <button class="btn ghost" @click="engine?.prev()">
         {{ settings.pageTurn === 'scroll' ? '上翻' : '上一页' }}
       </button>
@@ -535,13 +610,14 @@ onBeforeUnmount(() => {
           :aria-valuenow="Math.round(percent)"
           aria-valuemin="0"
           aria-valuemax="100"
-          title="点击跳转进度"
+          :aria-valuetext="pageLabel"
+          :title="`进度 ${formatPercent(percent)} · 点击跳转`"
           @click.stop="onProgressSeek"
           @keydown="onProgressKey"
         >
           <span :style="{ width: formatPercent(percent) }" />
         </div>
-        <span class="chrome-percent">{{ formatPercent(percent) }}</span>
+        <span class="chrome-percent" :title="formatPercent(percent)">{{ pageLabel }}</span>
       </div>
       <button
         v-if="engine?.capabilities.annotations !== false"
@@ -582,6 +658,75 @@ onBeforeUnmount(() => {
       </button>
     </footer>
 
+    <!-- Mobile / tablet: one job per control — no duplicate panel entries -->
+    <div
+      v-if="floatChrome && chromeVisible"
+      class="reader-float-chrome"
+      @mousedown="clearUiSelection"
+    >
+      <div class="float-top">
+        <button type="button" class="float-icon" title="返回书架" @click="back">‹</button>
+      </div>
+
+      <button
+        type="button"
+        class="float-tts"
+        :class="{ active: ttsSpeaking }"
+        :title="ttsSpeaking ? '停止朗读' : '朗读（长按打开设置）'"
+        @pointerdown="onTtsPlayPointerDown"
+        @pointerup="onTtsPlayPointerUp"
+        @pointerleave="onTtsPlayPointerCancel"
+        @pointercancel="onTtsPlayPointerCancel"
+        @click="onTtsPlayClick"
+      >
+        {{ ttsSpeaking ? '停' : '听' }}
+      </button>
+
+      <div class="float-bottom">
+        <div class="float-progress-row">
+          <div
+            class="progress-bar seekable float-progress-bar"
+            role="slider"
+            tabindex="0"
+            :aria-valuenow="Math.round(percent)"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuetext="pageLabel"
+            :title="`进度 ${formatPercent(percent)} · 点击跳转`"
+            @click.stop="onProgressSeek"
+            @keydown="onProgressKey"
+          >
+            <span :style="{ width: formatPercent(percent) }" />
+          </div>
+          <span class="float-page" :title="formatPercent(percent)">{{ pageLabel }}</span>
+        </div>
+        <nav class="float-toolbar" aria-label="阅读工具">
+          <button type="button" class="float-tool" title="目录" @click="openPanel('toc')">
+            <span class="float-tool-ico" aria-hidden="true">☰</span>
+            <span class="float-tool-label">目录</span>
+          </button>
+          <button type="button" class="float-tool" title="排版与主题" @click="openPanel('settings')">
+            <span class="float-tool-ico" aria-hidden="true">Aa</span>
+            <span class="float-tool-label">排版</span>
+          </button>
+          <button
+            v-if="engine?.capabilities.annotations !== false"
+            type="button"
+            class="float-tool"
+            title="笔记与书签"
+            @click="openPanel('annot')"
+          >
+            <span class="float-tool-ico" aria-hidden="true">✎</span>
+            <span class="float-tool-label">笔记</span>
+          </button>
+          <button type="button" class="float-tool" title="更多" @click="openPanel('more')">
+            <span class="float-tool-ico" aria-hidden="true">⋯</span>
+            <span class="float-tool-label">更多</span>
+          </button>
+        </nav>
+      </div>
+    </div>
+
     <div
       v-if="panel !== 'none'"
       class="reader-backdrop"
@@ -590,7 +735,13 @@ onBeforeUnmount(() => {
       @wheel.prevent
     />
 
-    <ReaderTocPanel :open="panel === 'toc'" :toc="toc" @close="closePanel" @select="goToc" />
+    <ReaderTocPanel
+      :open="panel === 'toc'"
+      :toc="toc"
+      :sheet="floatChrome"
+      @close="closePanel"
+      @select="goToc"
+    />
 
     <ReaderSearchPanel
       :open="panel === 'search'"
@@ -604,6 +755,7 @@ onBeforeUnmount(() => {
       :search-progress="searchProgress"
       :can-ocr="engine?.capabilities.offlineOcr === true"
       :snippet-html="snippetHtml"
+      :sheet="floatChrome"
       @close="closePanel"
       @update:query="onSearchQuery"
       @search="runSearch"
@@ -616,6 +768,8 @@ onBeforeUnmount(() => {
     <ReaderAnnotPanel
       :open="panel === 'annot'"
       :annots="annots"
+      :book="book"
+      :sheet="floatChrome"
       @close="closePanel"
       @select="goAnnot"
       @remove="removeAnnot"
@@ -629,6 +783,7 @@ onBeforeUnmount(() => {
       :page-turn-hint="pageTurnHint"
       :theme-tick="themeTick"
       :viewport-wide="viewportWide"
+      :sheet="floatChrome"
       @close="closePanel"
       @update="settingsStore.update"
     />
@@ -641,6 +796,7 @@ onBeforeUnmount(() => {
       :tts-speaking="ttsSpeaking"
       :voice-id-of="voiceIdOf"
       :voice-option-label="voiceOptionLabel"
+      :sheet="floatChrome"
       @close="closePanel"
       @voice-change="onTtsVoiceChange"
       @update="settingsStore.update"
@@ -653,8 +809,14 @@ onBeforeUnmount(() => {
       :book="book"
       :total-minutes="statsStore.stats.totalMinutes"
       :desktop-ui="desktopUi"
+      :sheet="floatChrome"
+      :can-search="engine?.capabilities.search !== false"
+      :can-annot="engine?.capabilities.annotations !== false"
       @close="closePanel"
       @delete="confirmDeleteBook"
+      @search="openPanel('search')"
+      @bookmark="addBookmark"
+      @tts="openPanel('tts')"
     />
   </div>
 </template>

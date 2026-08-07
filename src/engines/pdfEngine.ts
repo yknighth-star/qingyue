@@ -15,6 +15,7 @@ import { selectionRectFromSel } from '@/utils/selectionToolbar'
 import { highlightAnnotInRoot } from '@/utils/domHighlight'
 import { isSparseText, recognizeImage } from '@/utils/offlineOcr'
 import { compactCjkGaps, indexOfFlexible } from '@/utils/searchText'
+import { createMarkDragController, type MarkDragController, type MarkHandleRects } from '@/utils/markSelect'
 
 /**
  * Same-origin worker (copied to dist/public by vite plugin).
@@ -29,7 +30,7 @@ export class PdfEngine implements ReaderEngine {
   private pagesEl: HTMLElement | null = null
   private page = 1
   private settings: ReaderSettings | null = null
-  private progressCb: ((p: { locator: Locator; percent: number }) => void) | null = null
+  private progressCb: ((p: import('@/engines/types').ReadingProgress) => void) | null = null
   private wheelCb: ((deltaY: number) => void) | null = null
   private userZoom = 1
   private pdfQuality: 'smooth' | 'hd' = 'smooth'
@@ -40,6 +41,7 @@ export class PdfEngine implements ReaderEngine {
   private resizeTimer: number | null = null
   private lastRenderKey = ''
   private pageTurn: PageTurnMode = 'slide'
+  private selectMode = false
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
   private readonly curl = createCurlGate()
   private readonly searchHl = createSearchHighlightState()
@@ -48,6 +50,7 @@ export class PdfEngine implements ReaderEngine {
     capture: () => this.captureSelection(),
     onEmit: (ev) => this.selectionCb?.(ev),
   })
+  private markDragCtl: MarkDragController | null = null
   /** Cached page plain text for search (built lazily / incrementally). */
   private textCache = new Map<number, string>()
   private textLayerGen = 0
@@ -177,18 +180,25 @@ export class PdfEngine implements ReaderEngine {
 
   getProgress() {
     const total = this.pdf?.numPages || 1
+    const page = Math.min(total, Math.max(1, this.page || 1))
     if (this.pageTurn === 'scroll' && this.pagesEl) {
       const yRatio =
         this.pagesEl.scrollTop /
         Math.max(1, this.pagesEl.scrollHeight - this.pagesEl.clientHeight)
       return {
-        locator: { type: 'pdf' as const, page: this.page, yRatio },
+        locator: { type: 'pdf' as const, page, yRatio },
         percent: yRatio * 100,
+        page,
+        pageCount: total,
+        pageMode: 'exact' as const,
       }
     }
     return {
-      locator: { type: 'pdf' as const, page: this.page, yRatio: 0 },
-      percent: total <= 1 ? 0 : ((this.page - 1) / (total - 1)) * 100,
+      locator: { type: 'pdf' as const, page, yRatio: 0 },
+      percent: total <= 1 ? 0 : ((page - 1) / (total - 1)) * 100,
+      page,
+      pageCount: total,
+      pageMode: 'exact' as const,
     }
   }
 
@@ -347,7 +357,7 @@ export class PdfEngine implements ReaderEngine {
     return this.needsOcrCache
   }
 
-  onProgress(cb: (p: { locator: Locator; percent: number }) => void) {
+  onProgress(cb: (p: import('@/engines/types').ReadingProgress) => void) {
     this.progressCb = cb
   }
 
@@ -365,6 +375,71 @@ export class PdfEngine implements ReaderEngine {
 
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {
     this.selectionCb = cb
+  }
+
+  setSelectMode(active: boolean) {
+    this.selectMode = active
+    const el = this.pagesEl
+    if (!el) return
+    el.classList.toggle('select-mode', active)
+    el.style.touchAction = active ? 'auto' : ''
+  }
+
+  clearNativeSelection() {
+    this.markDragCtl?.endDrag()
+    this.markDragCtl?.endHandle()
+    try {
+      window.getSelection()?.removeAllRanges()
+    } catch {
+      /* */
+    }
+  }
+
+  private getMarkDrag(): MarkDragController {
+    if (!this.markDragCtl) {
+      this.markDragCtl = createMarkDragController({
+        getDocs: () => [document],
+        getRoot: () => this.pagesEl,
+      })
+    }
+    return this.markDragCtl
+  }
+
+  markDrag(phase: 'start' | 'move' | 'end', clientX: number, clientY: number): MarkHandleRects | null {
+    const ctl = this.getMarkDrag()
+    if (phase === 'start') {
+      ctl.beginDrag(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    if (phase === 'move') {
+      ctl.moveDrag(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    ctl.endDrag()
+    return ctl.getHandleRects()
+  }
+
+  markHandle(
+    phase: 'start' | 'move' | 'end',
+    which: 'start' | 'end',
+    clientX: number,
+    clientY: number,
+  ): MarkHandleRects | null {
+    const ctl = this.getMarkDrag()
+    if (phase === 'start') {
+      ctl.beginHandle(which)
+      return ctl.getHandleRects()
+    }
+    if (phase === 'move') {
+      ctl.moveHandle(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    ctl.endHandle()
+    return ctl.getHandleRects()
+  }
+
+  getMarkHandleRects(): MarkHandleRects | null {
+    return this.getMarkDrag().getHandleRects()
   }
 
   applyAnnotations(annots: AnnotationRecord[]) {

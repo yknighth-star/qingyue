@@ -13,6 +13,8 @@ const CURL_CLASSES = [
 /** 对齐市面阅读器：整段约 0.7s */
 const OUT_MS = 380
 const IN_MS = 300
+/** 手机轻量仿真：更快，但仍明显区别于横滑 */
+const LITE_OUT_MS = 300
 
 function wait(ms: number) {
   return new Promise<void>((r) => window.setTimeout(r, ms))
@@ -28,30 +30,23 @@ function frames(n = 2) {
   })
 }
 
-/**
- * Capture current viewport as a curling ghost, swap to the next page underneath,
- * then fold the ghost away — reading surface never blanks.
- */
-export async function runDualLayerCurl(
-  surface: HTMLElement | null,
+async function runCurlCore(
+  surface: HTMLElement,
   dir: 'next' | 'prev',
   swap: () => void | Promise<void>,
+  lite: boolean,
 ): Promise<void> {
-  if (!surface) {
-    await swap()
-    return
-  }
-
   const host = surface.parentElement || surface
   const prevHostOverflow = host.style.overflow
   const prevHostPerspective = host.style.perspective
   host.style.overflow = 'hidden'
   if (!getComputedStyle(host).perspective || getComputedStyle(host).perspective === 'none') {
-    host.style.perspective = '2200px'
+    host.style.perspective = lite ? '1600px' : '2200px'
   }
 
   const ghost = buildViewportGhost(surface)
   ghost.classList.add('page-curl-ghost')
+  if (lite) ghost.classList.add('page-curl-ghost-lite')
   const sRect = surface.getBoundingClientRect()
   const hRect = host.getBoundingClientRect()
   Object.assign(ghost.style, {
@@ -74,28 +69,53 @@ export async function runDualLayerCurl(
   const prevSurfaceZ = surface.style.zIndex
   const prevSurfaceOrigin = surface.style.transformOrigin
 
+  const outMs = lite ? LITE_OUT_MS : OUT_MS
+
   try {
     await swap()
     await frames(2)
 
     const isEpub = surface.classList.contains('epub-reader')
 
-    // EPUB: only curl the ghost — transforming the live surface breaks column layout
     surface.style.zIndex = '6'
     if (!isEpub) {
       surface.style.willChange = 'transform, filter'
       surface.classList.remove(...CURL_CLASSES)
       void surface.offsetWidth
-      surface.classList.add(dir === 'next' ? 'curl-under-next' : 'curl-under-prev')
+      surface.classList.add(
+        lite
+          ? dir === 'next'
+            ? 'curl-under-lite-next'
+            : 'curl-under-lite-prev'
+          : dir === 'next'
+            ? 'curl-under-next'
+            : 'curl-under-prev',
+      )
     }
 
-    ghost.classList.add(dir === 'next' ? 'curl-out-next' : 'curl-out-prev')
+    ghost.classList.add(
+      lite
+        ? dir === 'next'
+          ? 'curl-lite-out-next'
+          : 'curl-lite-out-prev'
+        : dir === 'next'
+          ? 'curl-out-next'
+          : 'curl-out-prev',
+    )
 
-    await wait(OUT_MS)
-    if (!isEpub) await wait(Math.max(0, IN_MS - 80))
+    await wait(outMs)
+    if (!isEpub && !lite) await wait(Math.max(0, IN_MS - 80))
   } finally {
     ghost.remove()
-    surface.classList.remove('curl-under-next', 'curl-under-prev', ...CURL_CLASSES)
+    surface.classList.remove(
+      'curl-under-next',
+      'curl-under-prev',
+      'curl-under-lite-next',
+      'curl-under-lite-prev',
+      'curl-lite-out-next',
+      'curl-lite-out-prev',
+      ...CURL_CLASSES,
+    )
     surface.style.transition = prevSurfaceTransition
     surface.style.transform = prevSurfaceTransform
     surface.style.filter = prevSurfaceFilter
@@ -105,6 +125,37 @@ export async function runDualLayerCurl(
     host.style.overflow = prevHostOverflow
     host.style.perspective = prevHostPerspective
   }
+}
+
+/**
+ * Capture current viewport as a curling ghost, swap to the next page underneath,
+ * then fold the ghost away — reading surface never blanks.
+ */
+export async function runDualLayerCurl(
+  surface: HTMLElement | null,
+  dir: 'next' | 'prev',
+  swap: () => void | Promise<void>,
+): Promise<void> {
+  if (!surface) {
+    await swap()
+    return
+  }
+  await runCurlCore(surface, dir, swap, false)
+}
+
+/**
+ * Mobile / coarse: lighter peel than full curl, but visually distinct from slide.
+ */
+export async function runDualLayerLiteCurl(
+  surface: HTMLElement | null,
+  dir: 'next' | 'prev',
+  swap: () => void | Promise<void>,
+): Promise<void> {
+  if (!surface) {
+    await swap()
+    return
+  }
+  await runCurlCore(surface, dir, swap, true)
 }
 
 /* Legacy single-layer helpers (unused by gate; kept for safety) */

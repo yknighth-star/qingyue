@@ -124,3 +124,19 @@ export function formatBytes(n: number): string {
 export function formatPercent(n: number): string {
   return `${Math.min(100, Math.max(0, Math.round(n)))}%`
 }
+
+/** Chrome label: `128 / 520`, `约 12 / 80`, or percent fallback. */
+export function formatPageLabel(p: {
+  percent: number
+  page?: number
+  pageCount?: number
+  pageMode?: 'exact' | 'estimate' | 'chapter'
+}): string {
+  const page = p.page
+  const total = p.pageCount
+  if (!page || !total || page < 1 || total < 1) return formatPercent(p.percent)
+  const pair = `${page} / ${total}`
+  if (p.pageMode === 'estimate') return `约 ${pair}`
+  if (p.pageMode === 'chapter') return `本节 ${pair}`
+  return pair
+}

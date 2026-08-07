@@ -14,6 +14,7 @@ const props = defineProps<{
   searchProgress?: { page: number; total: number } | null
   canOcr?: boolean
   snippetHtml: (snippet: string) => string
+  sheet?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -41,7 +42,8 @@ defineExpose({ focus: () => inputRef.value?.focus() })
 </script>
 
 <template>
-  <aside class="panel" :class="{ open }">
+  <aside class="panel panel-sheet-tall" :class="{ open, 'panel-sheet': sheet }">
+    <div v-if="sheet" class="panel-sheet-handle" aria-hidden="true" />
     <div class="panel-header">
       <strong>搜索</strong>
       <button class="btn ghost" @click="emit('close')">关闭</button>

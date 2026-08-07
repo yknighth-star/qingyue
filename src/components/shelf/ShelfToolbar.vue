@@ -27,11 +27,11 @@ const books = useBooksStore()
         placeholder="搜索书名、作者"
         autocomplete="off"
       />
-      <label class="shelf-sort">
-        <select v-model="books.sortBy" :aria-label="'排序'">
+      <div class="shelf-sort">
+        <select v-model="books.sortBy" aria-label="排序">
           <option v-for="s in sortOptions" :key="s.id" :value="s.id">{{ s.label }}</option>
         </select>
-      </label>
+      </div>
       <span class="shelf-count">{{ books.filtered.length }} / {{ books.books.length }}</span>
     </div>
     <div class="shelf-filter-groups">
@@ -46,7 +46,6 @@ const books = useBooksStore()
           {{ f.label }}
         </button>
       </div>
-      <span class="chip-sep" aria-hidden="true" />
       <div class="shelf-chips" role="group" aria-label="进度">
         <button
           v-for="p in progressOptions"

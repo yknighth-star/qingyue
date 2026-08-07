@@ -8,11 +8,13 @@ import {
   FULL_ENGINE_CAPABILITIES,
   type ContentGestureEvent,
   type ContentTapEvent,
+  type ReadingProgress,
   type ReaderEngine,
   type SelectionCaptureEvent,
 } from './types'
 import { createCurlGate, createSearchHighlightState } from './shared'
 import { injectCaretSuppression } from '@/utils/suppressCaret'
+import { createMarkDragController, type MarkDragController, type MarkHandleRects } from '@/utils/markSelect'
 
 type ContentsDoc = {
   document: Document
@@ -29,13 +31,18 @@ export class EpubEngine implements ReaderEngine {
   private toc: TocItem[] = []
   private spineLength = 1
   private spineIndex = 0
-  private progressCb: ((p: { locator: Locator; percent: number }) => void) | null = null
+  /** EPUB locations.generate finished — enables book-level page estimates. */
+  private locationsReady = false
+  private locationsGen = 0
+  private progressCb: ((p: ReadingProgress) => void) | null = null
   private wheelCb: ((deltaY: number) => void) | null = null
   private tapCb: ((e: ContentTapEvent) => void) | null = null
   private gestureCb: ((e: ContentGestureEvent) => void) | null = null
   private selectionCb: ((e: SelectionCaptureEvent | null) => void) | null = null
   private boundDocs = new WeakSet<Document>()
   private pageTurn: PageTurnMode = 'slide'
+  /** 划线模式：禁止翻页抢手势，touch-action 放开拖选 */
+  private selectMode = false
   private selectionDebounce: number | null = null
   private appliedHighlightCfis: string[] = []
   private readonly curl = createCurlGate()
@@ -43,6 +50,25 @@ export class EpubEngine implements ReaderEngine {
   private resizeObserver: ResizeObserver | null = null
   private resizeTimer: number | null = null
   private lastSize = { w: 0, h: 0 }
+  /** True while page-turn animation runs — ignore ResizeObserver (prevents shake). */
+  private layoutLocked = false
+  private overflowLocked = false
+  private markDragCtl: MarkDragController | null = null
+
+  private getMarkDrag(): MarkDragController {
+    if (!this.markDragCtl) {
+      this.markDragCtl = createMarkDragController({
+        getDocs: () => {
+          const contents = (
+            this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+          )?.getContents?.()
+          if (!contents?.length) return []
+          return contents.map((c) => c.document).filter(Boolean)
+        },
+      })
+    }
+    return this.markDragCtl
+  }
 
   async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
     this.destroy()
@@ -116,13 +142,33 @@ export class EpubEngine implements ReaderEngine {
     }
     this.observeResize(container)
 
+    this.curl.onBusyChange((b) => {
+      this.layoutLocked = b
+    })
+
     this.rendition.on('relocated', (...args: unknown[]) => {
-      const loc = args[0] as { start: { cfi: string; index: number }; percentage?: number }
+      const loc = args[0] as EpubRelocatedLoc
       this.spineIndex = loc.start?.index ?? 0
       this.progressCb?.(this.getProgressFromLoc(loc))
+      // Avoid style thrash on every page: lock once; typography only on new iframes (bindContentEvents).
       this.lockEpubHorizontalOverflow()
-      if (this.settings) this.applyTypographyToAllContents(this.settings)
+      this.snapPaginatedScroll()
     })
+
+    // Background location map → stable book-level 当前/总页 (estimate).
+    this.locationsReady = false
+    const gen = ++this.locationsGen
+    const locations = (this.book as Book & { locations?: { generate?: (chars: number) => Promise<unknown> } })
+      .locations
+    void locations?.generate?.(1600)
+      ?.then(() => {
+        if (gen !== this.locationsGen) return
+        this.locationsReady = true
+        this.progressCb?.(this.getProgress())
+      })
+      .catch(() => {
+        /* optional — fall back to section / spine pages */
+      })
   }
 
   /**
@@ -169,6 +215,7 @@ export class EpubEngine implements ReaderEngine {
 
   private applyResize(force: boolean) {
     if (!this.rendition || !this.container) return
+    if (this.layoutLocked && !force) return
     const cs = getComputedStyle(this.container)
     const pl = parseFloat(cs.paddingLeft) || 0
     const pr = parseFloat(cs.paddingRight) || 0
@@ -199,9 +246,35 @@ export class EpubEngine implements ReaderEngine {
     }
     // rendition.onResized already redisplays current CFI; re-lock + refresh spine inset
     window.setTimeout(() => {
+      this.overflowLocked = false
       this.lockEpubHorizontalOverflow()
+      this.snapPaginatedScroll()
       if (this.settings) this.applyTypographyToAllContents(this.settings)
     }, 60)
+  }
+
+  /**
+   * Paginated EPUB: snap .epub-container.scrollLeft to whole pages.
+   * Sub-pixel drift after many turns shows adjacent-column glyph slivers on both edges.
+   */
+  private snapPaginatedScroll() {
+    if (this.pageTurn === 'scroll') return
+    const root = this.container
+    if (!root) return
+    const scroller = root.querySelector('.epub-container') as HTMLElement | null
+    if (!scroller) return
+    const pageW = scroller.clientWidth
+    if (pageW < 8) return
+    const max = Math.max(0, scroller.scrollWidth - pageW)
+    const raw = scroller.scrollLeft
+    const snapped = Math.min(max, Math.max(0, Math.round(raw / pageW) * pageW))
+    if (Math.abs(raw - snapped) >= 0.5) {
+      scroller.scrollLeft = snapped
+    }
+    // Ensure the stage clips any residual column paint outside the page box.
+    root.style.setProperty('overflow', 'hidden', 'important')
+    scroller.style.setProperty('overflow-x', 'hidden', 'important')
+    scroller.style.setProperty('overflow-y', 'hidden', 'important')
   }
 
   /** Kill horizontal scrollbars that epub.js "overflow: auto" otherwise enables. */
@@ -213,13 +286,20 @@ export class EpubEngine implements ReaderEngine {
       container.style.setProperty('overflow-x', 'hidden', 'important')
       if (this.pageTurn === 'scroll') {
         container.style.setProperty('overflow-y', 'auto', 'important')
+      } else {
+        container.style.setProperty('overflow-y', 'hidden', 'important')
       }
       container.style.maxWidth = '100%'
       container.style.boxSizing = 'border-box'
     }
+    // Paginated: after first successful view lock, skip re-mutating every relocated (reduces jitter).
+    // Overflow clip above still runs every call.
+    if (this.pageTurn !== 'scroll' && this.overflowLocked) return
+
     // Only clamp view/iframe width in continuous scroll mode.
     // Paginated: epub.js expand() needs views wider than the viewport.
     if (this.pageTurn === 'scroll') {
+      this.overflowLocked = false
       root.querySelectorAll('.epub-view, .epub-view iframe').forEach((el) => {
         if (!(el instanceof HTMLElement)) return
         el.style.maxWidth = '100%'
@@ -236,6 +316,7 @@ export class EpubEngine implements ReaderEngine {
           el.style.removeProperty('overflow-x')
         }
       })
+      this.overflowLocked = true
     }
   }
 
@@ -257,12 +338,19 @@ export class EpubEngine implements ReaderEngine {
   private syncDocTouchAction(doc: Document) {
     const root = doc.documentElement
     if (!root) return
-    if (this.pageTurn === 'scroll') {
+    if (this.selectMode) {
+      root.style.touchAction = 'auto'
+      root.dataset.qyTurn = 'select'
+    } else if (this.pageTurn === 'scroll') {
       root.style.touchAction = 'pan-y'
       root.dataset.qyTurn = 'scroll'
     } else {
-      root.style.touchAction = 'none'
+      root.style.touchAction = 'manipulation'
       root.dataset.qyTurn = 'paged'
+    }
+    if (doc.body) {
+      doc.body.style.webkitUserSelect = 'text'
+      doc.body.style.userSelect = 'text'
     }
   }
 
@@ -322,36 +410,23 @@ export class EpubEngine implements ReaderEngine {
     )
 
     let pointerDown = false
-    doc.addEventListener('mousedown', () => {
-      pointerDown = true
-    })
-    doc.addEventListener('mouseup', (e) => {
-      pointerDown = false
-      const p = mapPointToParentViewport(e.clientX, e.clientY, doc)
-      this.scheduleEmitSelection(p.x, p.y)
-    })
-    doc.addEventListener('selectionchange', () => {
-      if (pointerDown) return
-      const sel = doc.getSelection()
-      if (!sel || sel.isCollapsed || !sel.toString().trim()) return
-      this.scheduleEmitSelection()
-    })
-
-    doc.addEventListener('click', (e) => {
-      const t = e.target as HTMLElement | null
-      const isLink = Boolean(t?.closest?.('a'))
-      const hasSelection = Boolean(this.captureSelection()?.text)
-      const p = mapPointToParentViewport(e.clientX, e.clientY, doc)
-      this.tapCb?.({ clientX: p.x, clientY: p.y, isLink, hasSelection })
-    })
-
-    // Bridge swipe/drag to reader shell (phone / tablet / PC touch & pen).
+    let selectingWithPointer = false
+    let lastPtr: PointerEvent | null = null
+    let longPressTimer: number | null = null
     let localSwipe: {
       id: number
       x0: number
       y0: number
+      t0: number
       dragging: boolean
     } | null = null
+
+    const LONG_PRESS_MS = 320
+
+    const selectionBusy = () => {
+      const sel = doc.getSelection()
+      return Boolean(sel && !sel.isCollapsed && sel.toString().trim())
+    }
 
     const emitGesture = (
       phase: ContentGestureEvent['phase'],
@@ -367,17 +442,83 @@ export class EpubEngine implements ReaderEngine {
       })
     }
 
+    const clearLongPressTimer = () => {
+      if (longPressTimer != null) {
+        window.clearTimeout(longPressTimer)
+        longPressTimer = null
+      }
+    }
+
+    /** Cancel page-swipe tracking (optionally keep finger free for selection). */
+    const abortSwipe = (e?: PointerEvent) => {
+      clearLongPressTimer()
+      if (!localSwipe) return
+      const ev = e || lastPtr
+      localSwipe = null
+      if (ev) emitGesture('cancel', ev)
+    }
+
+    /** Yield this finger to native selection / handle drag. */
+    const yieldToSelection = (e?: PointerEvent) => {
+      selectingWithPointer = true
+      abortSwipe(e)
+    }
+
+    doc.addEventListener('selectionchange', () => {
+      if (pointerDown && selectionBusy()) {
+        yieldToSelection()
+        return
+      }
+      if (pointerDown) return
+      if (!selectionBusy()) return
+      this.scheduleEmitSelection()
+    })
+
+    doc.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement | null
+      const isLink = Boolean(t?.closest?.('a'))
+      const hasSelection = Boolean(this.captureSelection()?.text)
+      const p = mapPointToParentViewport(e.clientX, e.clientY, doc)
+      this.tapCb?.({ clientX: p.x, clientY: p.y, isLink, hasSelection })
+    })
+
+    // Bridge swipe/drag to reader shell — yield to text selection (long-press / drag handles).
     doc.addEventListener(
       'pointerdown',
       (e) => {
+        pointerDown = true
+        selectingWithPointer = false
+        lastPtr = e
+        clearLongPressTimer()
+        // 划线模式：把指针事件交给壳层做自建拖选
+        if (this.selectMode) {
+          selectingWithPointer = true
+          emitGesture('start', e)
+          return
+        }
+        if (selectionBusy()) {
+          selectingWithPointer = true
+          return
+        }
         if (this.pageTurn === 'scroll') return
         if (e.pointerType === 'mouse' && e.button !== 0) return
         const t = e.target as HTMLElement | null
         if (t?.closest?.('a, button, input, textarea')) return
-        const sel = doc.getSelection()
-        if (sel && !sel.isCollapsed && sel.toString().trim()) return
-        localSwipe = { id: e.pointerId, x0: e.clientX, y0: e.clientY, dragging: false }
+        localSwipe = {
+          id: e.pointerId,
+          x0: e.clientX,
+          y0: e.clientY,
+          t0: Date.now(),
+          dragging: false,
+        }
         emitGesture('start', e)
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = null
+          if (localSwipe && localSwipe.id === e.pointerId && !localSwipe.dragging) {
+            emitGesture('longpress', e)
+            yieldToSelection(e)
+          }
+        }, LONG_PRESS_MS)
       },
       { passive: true },
     )
@@ -385,16 +526,37 @@ export class EpubEngine implements ReaderEngine {
     doc.addEventListener(
       'pointermove',
       (e) => {
+        lastPtr = e
+        if (this.selectMode) {
+          emitGesture('move', e)
+          return
+        }
+        if (selectingWithPointer) return
         if (!localSwipe || localSwipe.id !== e.pointerId) return
+        if (selectionBusy()) {
+          emitGesture('longpress', e)
+          yieldToSelection(e)
+          return
+        }
         const dx = e.clientX - localSwipe.x0
         const dy = e.clientY - localSwipe.y0
+        const held = Date.now() - localSwipe.t0
         if (!localSwipe.dragging) {
-          if (Math.abs(dx) < 12 && Math.abs(dy) < 12) return
-          if (Math.abs(dy) > Math.abs(dx) * 1.15) {
-            localSwipe = null
-            emitGesture('cancel', e)
+          if (held >= LONG_PRESS_MS) {
+            emitGesture('longpress', e)
+            yieldToSelection(e)
             return
           }
+          if (Math.abs(dx) < 28 && Math.abs(dy) < 28) return
+          if (Math.abs(dy) > Math.abs(dx) * 1.05) {
+            abortSwipe(e)
+            return
+          }
+          if (Math.abs(dx) < Math.abs(dy) * 1.35) {
+            abortSwipe(e)
+            return
+          }
+          clearLongPressTimer()
           localSwipe.dragging = true
           try {
             doc.documentElement.setPointerCapture?.(e.pointerId)
@@ -408,14 +570,31 @@ export class EpubEngine implements ReaderEngine {
       { passive: false },
     )
 
-    const endLocal = (phase: 'end' | 'cancel', e: PointerEvent) => {
-      if (!localSwipe || localSwipe.id !== e.pointerId) return
-      localSwipe = null
-      emitGesture(phase, e)
+    const endPointer = (phase: 'end' | 'cancel', e: PointerEvent) => {
+      pointerDown = false
+      lastPtr = e
+      clearLongPressTimer()
+      if (this.selectMode) {
+        selectingWithPointer = false
+        emitGesture(phase, e)
+        return
+      }
+      const hadSwipe = localSwipe && localSwipe.id === e.pointerId
+      const wasDrag = Boolean(hadSwipe && localSwipe!.dragging)
+      const wasSelecting = selectingWithPointer || selectionBusy()
+      if (hadSwipe) {
+        localSwipe = null
+        emitGesture(phase, e)
+      }
+      selectingWithPointer = false
+      if (!wasDrag || wasSelecting) {
+        const p = mapPointToParentViewport(e.clientX, e.clientY, doc)
+        this.scheduleEmitSelection(p.x, p.y)
+      }
     }
 
-    doc.addEventListener('pointerup', (e) => endLocal('end', e), { passive: true })
-    doc.addEventListener('pointercancel', (e) => endLocal('cancel', e), { passive: true })
+    doc.addEventListener('pointerup', (e) => endPointer('end', e), { passive: true })
+    doc.addEventListener('pointercancel', (e) => endPointer('cancel', e), { passive: true })
   }
 
   destroy() {
@@ -437,6 +616,8 @@ export class EpubEngine implements ReaderEngine {
     }
     this.book = null
     this.rendition = null
+    this.locationsReady = false
+    this.locationsGen += 1
     this.selectionCb = null
     this.tapCb = null
     this.gestureCb = null
@@ -450,6 +631,7 @@ export class EpubEngine implements ReaderEngine {
     const prev = this.settings
     this.settings = { ...settings }
     this.pageTurn = settings.pageTurn
+    this.overflowLocked = false
     if (this.container) {
       this.container.dataset.turn = settings.pageTurn
       applyThemeVars(this.container, effectiveTheme(settings), settings)
@@ -555,18 +737,19 @@ export class EpubEngine implements ReaderEngine {
     return this.toc
   }
 
-  getProgress() {
+  getProgress(): ReadingProgress {
     try {
-      const loc = this.rendition?.currentLocation() as
-        | { start: { cfi: string; index: number }; percentage?: number }
-        | undefined
-      if (loc) return this.getProgressFromLoc(loc)
+      const loc = this.rendition?.currentLocation() as EpubRelocatedLoc | undefined
+      if (loc?.start) return this.getProgressFromLoc(loc)
     } catch {
       /* */
     }
     return {
       locator: { type: 'epub' as const, spineIndex: this.spineIndex },
       percent: (this.spineIndex / Math.max(1, this.spineLength - 1)) * 100,
+      page: this.spineIndex + 1,
+      pageCount: Math.max(1, this.spineLength),
+      pageMode: 'estimate',
     }
   }
 
@@ -625,6 +808,25 @@ export class EpubEngine implements ReaderEngine {
       /* at bound */
     }
     await relocated
+    // Double-rAF: paint settles, then snap out any mid-column scrollLeft drift.
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+    this.snapPaginatedScroll()
+    this.clearTurnArtifacts()
+  }
+
+  /** Soft-turn / drag chrome must not leave transform/filter on the live surface. */
+  private clearTurnArtifacts() {
+    const root = this.container
+    if (!root) return
+    root.style.removeProperty('transform')
+    root.style.removeProperty('filter')
+    root.style.removeProperty('box-shadow')
+    root.style.removeProperty('will-change')
+    root.style.removeProperty('opacity')
+    const host = root.parentElement
+    if (host) {
+      host.style.removeProperty('perspective')
+    }
   }
 
   async search(query: string): Promise<SearchHit[]> {
@@ -680,7 +882,7 @@ export class EpubEngine implements ReaderEngine {
     return hits.slice(0, 40)
   }
 
-  onProgress(cb: (p: { locator: Locator; percent: number }) => void) {
+  onProgress(cb: (p: ReadingProgress) => void) {
     this.progressCb = cb
   }
 
@@ -698,6 +900,88 @@ export class EpubEngine implements ReaderEngine {
 
   onSelection(cb: (e: SelectionCaptureEvent | null) => void) {
     this.selectionCb = cb
+  }
+
+  setSelectMode(active: boolean) {
+    this.selectMode = active
+    this.syncAllDocsTouchAction()
+    if (this.container) {
+      this.container.classList.toggle('select-mode', active)
+    }
+    // iframe 内也用绿色选区，贴近华为阅读
+    const contents = (
+      this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+    )?.getContents?.()
+    if (!contents?.length) return
+    for (const c of contents) {
+      const doc = c.document
+      if (!doc) continue
+      let style = doc.getElementById('qy-mark-selection') as HTMLStyleElement | null
+      if (active) {
+        if (!style) {
+          style = doc.createElement('style')
+          style.id = 'qy-mark-selection'
+          style.textContent =
+            '::selection, *::selection { background: rgba(61, 155, 95, 0.35) !important; color: inherit !important; }'
+          ;(doc.head || doc.documentElement).appendChild(style)
+        }
+      } else {
+        style?.remove()
+      }
+    }
+  }
+
+  clearNativeSelection() {
+    this.markDragCtl?.endDrag()
+    this.markDragCtl?.endHandle()
+    const contents = (
+      this.rendition as unknown as { getContents?: () => ContentsDoc[] }
+    )?.getContents?.()
+    if (!contents?.length) return
+    for (const c of contents) {
+      try {
+        c.document.getSelection()?.removeAllRanges()
+      } catch {
+        /* */
+      }
+    }
+  }
+
+  markDrag(phase: 'start' | 'move' | 'end', clientX: number, clientY: number): MarkHandleRects | null {
+    const ctl = this.getMarkDrag()
+    if (phase === 'start') {
+      ctl.beginDrag(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    if (phase === 'move') {
+      ctl.moveDrag(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    ctl.endDrag()
+    return ctl.getHandleRects()
+  }
+
+  markHandle(
+    phase: 'start' | 'move' | 'end',
+    which: 'start' | 'end',
+    clientX: number,
+    clientY: number,
+  ): MarkHandleRects | null {
+    const ctl = this.getMarkDrag()
+    if (phase === 'start') {
+      ctl.beginHandle(which)
+      return ctl.getHandleRects()
+    }
+    if (phase === 'move') {
+      ctl.moveHandle(clientX, clientY)
+      return ctl.getHandleRects()
+    }
+    ctl.endHandle()
+    return ctl.getHandleRects()
+  }
+
+  getMarkHandleRects(): MarkHandleRects | null {
+    return this.getMarkDrag().getHandleRects()
   }
 
   highlightSearch(query: string | null) {
@@ -873,12 +1157,28 @@ export class EpubEngine implements ReaderEngine {
    * body/p theme rules (class specificity). Inject a dedicated stylesheet with
    * html body …[class] selectors, plus inline fallback after layout settles.
    */
+  private typographyFingerprint(settings: ReaderSettings) {
+    return [
+      settings.fontSize,
+      settings.lineHeight,
+      settings.fontFamily,
+      settings.paragraphGap,
+      settings.indent,
+      settings.pageTurn,
+    ].join('\0')
+  }
+
   private applyTypographyToDocument(doc: Document, settings: ReaderSettings) {
     const body = doc.body
     if (!body) return
 
+    const fp = this.typographyFingerprint(settings)
     const id = 'qingyue-typography'
     let styleEl = doc.getElementById(id) as HTMLStyleElement | null
+    // Idempotent: rewriting textContent/inline styles forces reflow and looks like
+    // fonts "jumping" on every page turn even when settings did not change.
+    if (styleEl?.textContent && body.dataset.qyTypography === fp) return
+
     if (!styleEl) {
       styleEl = doc.createElement('style')
       styleEl.id = id
@@ -949,6 +1249,7 @@ html body h6 {
       body.style.setProperty('padding-top', '0', 'important')
       body.style.setProperty('padding-bottom', '0', 'important')
     }
+    body.dataset.qyTypography = fp
   }
 
   private applyTypographyToAllContents(settings: ReaderSettings) {
@@ -1179,11 +1480,50 @@ html body h6 {
     }
   }
 
-  private getProgressFromLoc(loc: { start: { cfi: string; index: number }; percentage?: number }) {
+  private getProgressFromLoc(loc: EpubRelocatedLoc): ReadingProgress {
     const percent =
       typeof loc.percentage === 'number'
         ? loc.percentage * 100
-        : (loc.start.index / Math.max(1, this.spineLength - 1)) * 100
+        : typeof loc.start?.percentage === 'number'
+          ? loc.start.percentage * 100
+          : (loc.start.index / Math.max(1, this.spineLength - 1)) * 100
+
+    let page: number | undefined
+    let pageCount: number | undefined
+    let pageMode: ReadingProgress['pageMode']
+
+    const locations = (
+      this.book as Book & {
+        locations?: {
+          length?: () => number
+          locationFromCfi?: (cfi: string) => number
+        }
+      }
+    )?.locations
+
+    if (this.locationsReady && locations?.length && locations.locationFromCfi && loc.start.cfi) {
+      const total = locations.length()
+      if (total > 0) {
+        const idx = locations.locationFromCfi(loc.start.cfi)
+        const n = typeof idx === 'number' && Number.isFinite(idx) ? idx : 0
+        page = Math.min(total, Math.max(1, Math.floor(n) + 1))
+        pageCount = total
+        pageMode = 'estimate'
+      }
+    }
+
+    if (page == null && loc.start.displayed && loc.start.displayed.total > 0) {
+      page = Math.max(1, loc.start.displayed.page || 1)
+      pageCount = loc.start.displayed.total
+      pageMode = 'chapter'
+    }
+
+    if (page == null) {
+      page = (loc.start.index ?? 0) + 1
+      pageCount = Math.max(1, this.spineLength)
+      pageMode = 'estimate'
+    }
+
     return {
       locator: {
         type: 'epub' as const,
@@ -1191,7 +1531,20 @@ html body h6 {
         spineIndex: loc.start.index,
       },
       percent,
+      page,
+      pageCount,
+      pageMode,
     }
+  }
+}
+
+type EpubRelocatedLoc = {
+  percentage?: number
+  start: {
+    cfi: string
+    index: number
+    percentage?: number
+    displayed?: { page: number; total: number }
   }
 }
 

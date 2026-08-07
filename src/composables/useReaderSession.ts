@@ -24,6 +24,9 @@ export function useReaderSession(opts: {
   // Engines use TS private fields — must not be deep-proxied by Vue
   const engine = shallowRef<ReaderEngine | null>(null)
   const percent = ref(0)
+  const page = ref<number | undefined>(undefined)
+  const pageCount = ref<number | undefined>(undefined)
+  const pageMode = ref<'exact' | 'estimate' | 'chapter' | undefined>(undefined)
   const toc = ref<TocItem[]>([])
   const opening = ref(true)
   const openHint = ref('正在打开…')
@@ -88,6 +91,9 @@ export function useReaderSession(opts: {
 
       eng.onProgress?.((p) => {
         percent.value = p.percent
+        page.value = p.page
+        pageCount.value = p.pageCount
+        pageMode.value = p.pageMode
         scheduleSave(p.locator, p.percent)
       })
       eng.onWheel?.(opts.onWheel)
@@ -96,7 +102,11 @@ export function useReaderSession(opts: {
       eng.onSelection?.(opts.onSelection)
       engine.value = markRaw(eng)
       toc.value = eng.getToc()
-      percent.value = eng.getProgress().percent
+      const initial = eng.getProgress()
+      percent.value = initial.percent
+      page.value = initial.page
+      pageCount.value = initial.pageCount
+      pageMode.value = initial.pageMode
       // Mark opened without overwriting a higher saved percent (page 1 ≈ 0%)
       void books.touchOpened(b.id)
 
@@ -132,6 +142,9 @@ export function useReaderSession(opts: {
     book,
     engine,
     percent,
+    page,
+    pageCount,
+    pageMode,
     toc,
     opening,
     openHint,

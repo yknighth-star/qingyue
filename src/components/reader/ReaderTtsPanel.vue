@@ -9,6 +9,7 @@ defineProps<{
   ttsSpeaking: boolean
   voiceIdOf: (v: SpeechSynthesisVoice) => string
   voiceOptionLabel: (v: SpeechSynthesisVoice) => string
+  sheet?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -21,7 +22,8 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <aside class="panel" :class="{ open }">
+  <aside class="panel" :class="{ open, 'panel-sheet': sheet }">
+    <div v-if="sheet" class="panel-sheet-handle" aria-hidden="true" />
     <div class="panel-header">
       <strong>朗读</strong>
       <button class="btn ghost" @click="emit('close')">关闭</button>

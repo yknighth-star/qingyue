@@ -1,10 +1,14 @@
-/* 仿真 / 横滑：对齐微信读书·华为阅读 —— 分页动效挂在引擎根节点 */
-.epub-reader,
+/* 仿真 / 横滑：分页动效挂在引擎根节点 — 勿给 EPUB 常驻 will-change（会抖字） */
 .txt-reader,
 .pdf-reader {
   position: relative;
   transform-style: preserve-3d;
   will-change: transform, opacity, filter, box-shadow;
+  backface-visibility: hidden;
+}
+
+.epub-reader {
+  position: relative;
   backface-visibility: hidden;
 }
 
@@ -15,8 +19,13 @@
   contain: paint;
 }
 
+.page-slide-ghost-epub {
+  overflow: hidden !important;
+}
+
 .page-slide-iframe-snap {
   pointer-events: none;
+  overflow: hidden;
 }
 
 .slide-hold {
@@ -92,24 +101,47 @@
   }
 }
 
-/* 仿真跟手预览（松手后走完整 curl 动画） */
-.reader-stage.curl-drag .engine-host > * {
+/* 仿真跟手预览（松手后走完整 / 轻量 curl 动画） */
+.reader-stage.curl-drag .engine-host > *:not(.epub-reader) {
   transform-origin: left center;
   transition: none;
   will-change: transform;
 }
 
-.reader-stage.curl-drag-next .engine-host > * {
-  transform: perspective(2200px) rotateY(calc(var(--curl-drag, 0) * -72deg));
-  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.2));
-  box-shadow: calc(var(--curl-drag, 0) * -20px) 0 32px rgba(0, 0, 0, 0.22);
+.reader-stage.curl-drag-next .engine-host > *:not(.epub-reader) {
+  transform: perspective(1800px) rotateY(calc(var(--curl-drag, 0) * -68deg));
+  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.18));
+  box-shadow: calc(var(--curl-drag, 0) * -18px) 0 28px rgba(0, 0, 0, 0.2);
 }
 
-.reader-stage.curl-drag-prev .engine-host > * {
+.reader-stage.curl-drag-prev .engine-host > *:not(.epub-reader) {
   transform-origin: right center;
-  transform: perspective(2200px) rotateY(calc(var(--curl-drag, 0) * 72deg));
-  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.2));
-  box-shadow: calc(var(--curl-drag, 0) * 20px) 0 32px rgba(0, 0, 0, 0.22);
+  transform: perspective(1800px) rotateY(calc(var(--curl-drag, 0) * 68deg));
+  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.18));
+  box-shadow: calc(var(--curl-drag, 0) * 18px) 0 28px rgba(0, 0, 0, 0.2);
+}
+
+/* 横滑跟手：整页平移（与仿真旋转明确区分） */
+.reader-stage.slide-drag .engine-host > *:not(.epub-reader) {
+  transition: none;
+  will-change: transform;
+}
+
+.reader-stage.slide-drag-next .engine-host > *:not(.epub-reader) {
+  transform: translate3d(calc(var(--slide-drag, 0) * -100%), 0, 0);
+}
+
+.reader-stage.slide-drag-prev .engine-host > *:not(.epub-reader) {
+  transform: translate3d(calc(var(--slide-drag, 0) * 100%), 0, 0);
+}
+
+/* EPUB: never apply live curl-drag transform */
+.reader-stage.curl-drag .engine-host > .epub-reader,
+.reader-stage.slide-drag .engine-host > .epub-reader {
+  transform: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+  will-change: auto !important;
 }
 
 .curl-hold {
@@ -230,6 +262,137 @@
   animation: simUnderPrev 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
 }
 
+/* —— 轻量仿真（手机 / 触摸）：角度略小、更快，但绝非平移 —— */
+.curl-lite-out-next {
+  transform-origin: left center;
+  animation: liteOutNext 0.3s cubic-bezier(0.4, 0.0, 0.55, 1) forwards;
+}
+
+.curl-lite-out-prev {
+  transform-origin: right center;
+  animation: liteOutPrev 0.3s cubic-bezier(0.4, 0.0, 0.55, 1) forwards;
+}
+
+.curl-under-lite-next {
+  transform-origin: left center;
+  animation: liteUnderNext 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-under-lite-prev {
+  transform-origin: right center;
+  animation: liteUnderPrev 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-lite-out-next::after,
+.curl-lite-out-prev::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.curl-lite-out-next::after {
+  background: linear-gradient(
+    to left,
+    rgba(0, 0, 0, 0.28) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    transparent 58%
+  );
+}
+
+.curl-lite-out-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.28) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    transparent 58%
+  );
+}
+
+@keyframes liteOutNext {
+  0% {
+    transform: perspective(1600px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(1600px) rotateY(-78deg);
+    filter: brightness(0.78);
+    opacity: 0;
+    box-shadow: -22px 0 36px rgba(0, 0, 0, 0.26);
+  }
+}
+
+@keyframes liteOutPrev {
+  0% {
+    transform: perspective(1600px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(1600px) rotateY(78deg);
+    filter: brightness(0.78);
+    opacity: 0;
+    box-shadow: 22px 0 36px rgba(0, 0, 0, 0.26);
+  }
+}
+
+@keyframes liteUnderNext {
+  0% {
+    transform: perspective(1600px) translateX(4%) rotateY(-4deg);
+    filter: brightness(0.95);
+  }
+  100% {
+    transform: perspective(1600px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+@keyframes liteUnderPrev {
+  0% {
+    transform: perspective(1600px) translateX(-4%) rotateY(4deg);
+    filter: brightness(0.95);
+  }
+  100% {
+    transform: perspective(1600px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+/* EPUB soft-cover: column ghost paper or solid fallback */
+.page-epub-turn-paper,
+.page-epub-turn-cover {
+  background: var(--reader-bg, #f3ead3);
+}
+
+/* Fold shade only while curling — keep alpha modest so peels never read as a black plate */
+.page-epub-turn-curl::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.page-epub-turn-curl.page-epub-turn-next::after {
+  background: linear-gradient(
+    to left,
+    rgba(0, 0, 0, 0.18) 0%,
+    rgba(0, 0, 0, 0.05) 28%,
+    transparent 55%
+  );
+}
+
+.page-epub-turn-curl.page-epub-turn-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.18) 0%,
+    rgba(0, 0, 0, 0.05) 28%,
+    transparent 55%
+  );
+}
+
 @keyframes simOutNext {
   0% {
     transform: perspective(2200px) rotateY(0deg);
@@ -336,7 +499,8 @@
   perspective: 2200px;
   overflow: hidden;
   background: var(--reader-bg, #f3ead3);
-  touch-action: none;
+  /* Allow native text selection / long-press; swipe handled in JS after threshold */
+  touch-action: manipulation;
   overscroll-behavior: none;
 }
 
@@ -345,27 +509,33 @@
   overscroll-behavior-y: contain;
 }
 
-/* EPUB: never apply live curl-drag transform (breaks column metrics on all form factors) */
-.reader-stage.curl-drag .engine-host > .epub-reader {
+/* EPUB live drag: never transform .epub-reader (breaks column metrics) */
+.reader-stage.curl-drag .engine-host > .epub-reader,
+.reader-stage.slide-drag .engine-host > .epub-reader {
   transform: none !important;
   filter: none !important;
   box-shadow: none !important;
   will-change: auto !important;
 }
 
-/* 横滑 / 仿真：PDF 锁定为整页，禁止自由纵滑 */
+/* 横滑 / 仿真：PDF 锁定为整页，禁止自由纵滑 — 仍允许长按选字 */
 .pdf-pages[data-turn='slide'],
 .pdf-pages[data-turn='curl'] {
   overflow-y: hidden !important;
   scroll-behavior: auto !important;
-  touch-action: none;
+  touch-action: manipulation;
 }
 
 .txt-content[data-turn='slide'],
 .txt-content[data-turn='curl'] {
   overflow-y: hidden !important;
   scroll-behavior: auto !important;
-  touch-action: none;
+  touch-action: manipulation;
+}
+
+.txt-content.select-mode,
+.pdf-pages.select-mode {
+  touch-action: auto !important;
 }
 
 .txt-content[data-turn='scroll'],

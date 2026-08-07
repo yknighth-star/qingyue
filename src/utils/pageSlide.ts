@@ -85,7 +85,11 @@ function transferLayoutStyles(from: Element, to: HTMLElement) {
   }
 }
 
-/** Snapshot an EPUB/PDF iframe so the visible column page matches the live view. */
+/**
+ * Snapshot an EPUB/PDF iframe so the visible column page matches the live view.
+ * Keep styles in the light DOM (brief lifetime under the turn plate). Selector
+ * rewriting / Shadow DOM broke CSS columns and produced blank green/black peels.
+ */
 function iframeToSnapshot(iframe: HTMLIFrameElement): HTMLElement {
   const shell = document.createElement('div')
   const w = iframe.offsetWidth || iframe.clientWidth
@@ -93,7 +97,6 @@ function iframeToSnapshot(iframe: HTMLIFrameElement): HTMLElement {
   shell.className = 'page-slide-iframe-snap'
   shell.style.cssText = `width:${w}px;height:${h}px;overflow:hidden;position:relative;pointer-events:none;box-sizing:border-box`
 
-  // Preserve positioning from the live iframe (epub.js sizes the frame to the section).
   const iframeCs = getComputedStyle(iframe)
   if (iframeCs.position && iframeCs.position !== 'static') {
     shell.style.position = iframeCs.position
@@ -111,11 +114,17 @@ function iframeToSnapshot(iframe: HTMLIFrameElement): HTMLElement {
       return shell
     }
 
-    const bodyBg =
-      getComputedStyle(doc.body).backgroundColor ||
-      getComputedStyle(doc.documentElement).backgroundColor ||
-      'transparent'
-    shell.style.background = bodyBg
+    const readerBg =
+      getComputedStyle(iframe.closest('.epub-reader') || document.documentElement)
+        .getPropertyValue('--reader-bg')
+        .trim() || '#f3ead3'
+    const bodyBg = getComputedStyle(doc.body).backgroundColor
+    const htmlBg = getComputedStyle(doc.documentElement).backgroundColor
+    const bg =
+      (bodyBg && bodyBg !== 'rgba(0, 0, 0, 0)' && bodyBg !== 'transparent' ? bodyBg : null) ||
+      (htmlBg && htmlBg !== 'rgba(0, 0, 0, 0)' && htmlBg !== 'transparent' ? htmlBg : null) ||
+      readerBg
+    shell.style.background = bg
 
     for (const st of Array.from(doc.head.querySelectorAll('style'))) {
       shell.appendChild(st.cloneNode(true))
@@ -137,7 +146,6 @@ function iframeToSnapshot(iframe: HTMLIFrameElement): HTMLElement {
     const layoutRoot = document.createElement('div')
     layoutRoot.className = 'page-slide-iframe-layout'
     transferLayoutStyles(doc.documentElement, layoutRoot)
-    // documentElement width/height often drive the column canvas
     const htmlCs = getComputedStyle(doc.documentElement)
     layoutRoot.style.width = htmlCs.width || `${w}px`
     layoutRoot.style.height = htmlCs.height || `${h}px`
@@ -155,7 +163,7 @@ function iframeToSnapshot(iframe: HTMLIFrameElement): HTMLElement {
 
     shell.appendChild(layoutRoot)
   } catch {
-    shell.style.background = 'transparent'
+    shell.style.background = 'var(--reader-bg, #f3ead3)'
   }
   return shell
 }
@@ -177,20 +185,42 @@ function findScrollRoot(surface: HTMLElement): HTMLElement {
   )
 }
 
-/** EPUB: clip by .epub-container scrollLeft (paginated pages are horizontal). */
+/**
+ * EPUB: clip by .epub-container scrollLeft (paginated pages are horizontal).
+ * Prefer full-column clone + snapped translate (readable text) over viewport-only
+ * snapshots (those often paint blank/black peels).
+ */
 function buildEpubViewportGhost(surface: HTMLElement, container: HTMLElement): HTMLElement {
   const w = surface.clientWidth
   const h = surface.clientHeight
-  const ghost = document.createElement('div')
-  ghost.className = 'page-slide-ghost'
   const cs = getComputedStyle(surface)
-  ghost.style.background = cs.backgroundColor || 'var(--reader-bg, #f3ead3)'
-  ghost.style.overflow = 'hidden'
-  ghost.style.width = `${w}px`
-  ghost.style.height = `${h}px`
-  ghost.style.boxSizing = 'border-box'
-  ghost.style.pointerEvents = 'none'
-  ghost.style.position = 'relative'
+  const bg = cs.backgroundColor || 'var(--reader-bg, #f3ead3)'
+
+  const pageW = container.clientWidth
+  let scrollLeft = container.scrollLeft
+  let scrollTop = container.scrollTop
+  if (pageW >= 8) {
+    const snapped = Math.round(scrollLeft / pageW) * pageW
+    if (Math.abs(scrollLeft - snapped) >= 0.5) {
+      container.scrollLeft = snapped
+      scrollLeft = snapped
+    }
+  }
+  scrollLeft = Math.round(scrollLeft)
+  scrollTop = Math.round(scrollTop)
+
+  const ghost = document.createElement('div')
+  ghost.className = 'page-slide-ghost page-slide-ghost-epub'
+  Object.assign(ghost.style, {
+    background: bg,
+    overflow: 'hidden',
+    width: `${w}px`,
+    height: `${h}px`,
+    boxSizing: 'border-box',
+    pointerEvents: 'none',
+    position: 'relative',
+    contain: 'paint',
+  })
 
   const clone = container.cloneNode(true) as HTMLElement
   clone.querySelectorAll('script').forEach((s) => s.remove())
@@ -206,12 +236,30 @@ function buildEpubViewportGhost(surface: HTMLElement, container: HTMLElement): H
     width: `${Math.max(container.scrollWidth, container.clientWidth)}px`,
     height: `${Math.max(container.scrollHeight, container.clientHeight)}px`,
     margin: '0',
-    overflow: 'visible',
-    transform: `translate3d(${-container.scrollLeft}px, ${-container.scrollTop}px, 0)`,
+    overflow: 'hidden',
+    transform: `translate3d(${-scrollLeft}px, ${-scrollTop}px, 0)`,
     willChange: 'auto',
   })
-
   ghost.appendChild(clone)
+
+  // Soft edge masks hide residual adjacent-column fringe without blanking the page.
+  const maskW = 2
+  for (const side of ['left', 'right'] as const) {
+    const mask = document.createElement('div')
+    mask.className = 'page-slide-ghost-edge'
+    Object.assign(mask.style, {
+      position: 'absolute',
+      top: '0',
+      bottom: '0',
+      [side]: '0',
+      width: `${maskW}px`,
+      background: bg,
+      pointerEvents: 'none',
+      zIndex: '2',
+    })
+    ghost.appendChild(mask)
+  }
+
   return ghost
 }
 

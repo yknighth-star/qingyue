@@ -10,7 +10,7 @@ export type SelectionCapture = {
 
 /**
  * Host-document selection bridge for TXT / PDF (not EPUB iframes).
- * Debounces mouseup + selectionchange into onEmit.
+ * Debounces pointer/mouse end + selectionchange into onEmit (mobile long-press included).
  */
 export function createHostSelectionBridge(opts: {
   getRoot: () => HTMLElement | null
@@ -19,6 +19,7 @@ export function createHostSelectionBridge(opts: {
 }) {
   let debounce: number | null = null
   let selectingPointer = false
+  let boundEl: HTMLElement | null = null
 
   function schedule(fallbackX?: number, fallbackY?: number) {
     if (debounce) window.clearTimeout(debounce)
@@ -40,20 +41,44 @@ export function createHostSelectionBridge(opts: {
     schedule()
   }
 
+  const onPointerDown = () => {
+    selectingPointer = true
+  }
+
+  const onPointerUp = (e: PointerEvent) => {
+    selectingPointer = false
+    schedule(e.clientX, e.clientY)
+  }
+
+  const onPointerCancel = () => {
+    selectingPointer = false
+  }
+
+  /** Desktop browsers that still emit mouse without pointer (rare) */
+  const onMouseUp = (e: MouseEvent) => {
+    selectingPointer = false
+    schedule(e.clientX, e.clientY)
+  }
+
   function bind(el: HTMLElement) {
-    el.addEventListener('mousedown', () => {
-      selectingPointer = true
-    })
-    el.addEventListener('mouseup', (e) => {
-      selectingPointer = false
-      schedule(e.clientX, e.clientY)
-    })
+    boundEl = el
+    el.addEventListener('pointerdown', onPointerDown)
+    el.addEventListener('pointerup', onPointerUp)
+    el.addEventListener('pointercancel', onPointerCancel)
+    el.addEventListener('mouseup', onMouseUp)
     document.addEventListener('selectionchange', onDocSelectionChange)
   }
 
   function destroy() {
     if (debounce) window.clearTimeout(debounce)
     debounce = null
+    if (boundEl) {
+      boundEl.removeEventListener('pointerdown', onPointerDown)
+      boundEl.removeEventListener('pointerup', onPointerUp)
+      boundEl.removeEventListener('pointercancel', onPointerCancel)
+      boundEl.removeEventListener('mouseup', onMouseUp)
+      boundEl = null
+    }
     document.removeEventListener('selectionchange', onDocSelectionChange)
   }
 

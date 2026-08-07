@@ -5,6 +5,8 @@ import type { TocItem } from '@/types'
 defineProps<{
   open: boolean
   toc: TocItem[]
+  /** Mobile: bottom sheet instead of right drawer */
+  sheet?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -14,7 +16,8 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <aside class="panel" :class="{ open }">
+  <aside class="panel panel-sheet-tall" :class="{ open, 'panel-sheet': sheet }">
+    <div v-if="sheet" class="panel-sheet-handle" aria-hidden="true" />
     <div class="panel-header">
       <strong>目录</strong>
       <button class="btn ghost" @click="emit('close')">关闭</button>
