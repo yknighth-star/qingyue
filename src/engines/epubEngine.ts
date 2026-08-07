@@ -16,6 +16,7 @@ import { createCurlGate, createMarkSurface, createSearchHighlightState } from '.
 import { injectCaretSuppression } from '@/utils/suppressCaret'
 import type { MarkHandleRects } from '@/utils/markSelect'
 import { searchEpubBook } from './epubSearch'
+import { revokeFontUrlCache, remapBookCssFonts, rewriteEpubFontUrls, rewriteHtmlFontUrls } from './epubFontUrls'
 
 type ContentsDoc = {
   document: Document
@@ -46,6 +47,8 @@ export class EpubEngine implements ReaderEngine {
   private themeApplyDepth = 0
   /** Ignore MutationObserver echoes from our own inline theme writes. */
   private themeQuietUntil = 0
+  /** blob: URLs for publisher fonts rewritten out of about:srcdoc. */
+  private fontUrlCache = new Map<string, string>()
   private pageTurn: PageTurnMode = 'slide'
   /** 划线模式：禁止翻页抢手势，touch-action 放开拖选 */
   private selectMode = false
@@ -82,9 +85,12 @@ export class EpubEngine implements ReaderEngine {
     // Blob URLs lack an .epub extension, so epubjs mis-detects type and never finishes
     // opening. Pass ArrayBuffer so it opens as binary EPUB reliably.
     const data = await blob.arrayBuffer()
-    this.book = ePub(data)
+    this.book = ePub(data, { replacements: 'blobUrl' })
     await this.book.opened
     await this.book.ready
+    // Rewrite font urls inside CSS blobs BEFORE first iframe paint (avoids blocked:other).
+    await remapBookCssFonts(this.book, this.fontUrlCache)
+    this.registerFontSerializeHook()
     this.spineLength = (this.book.spine as { length?: number }).length || 1
     const nav = this.book.navigation
     this.toc = flattenNav(nav?.toc || [])
@@ -381,6 +387,8 @@ export class EpubEngine implements ReaderEngine {
       this.applyTypographyToDocument(doc, this.settings)
       this.scheduleThemeRepaint(doc)
     }
+    // Publisher @font-face relative urls resolve to about:srcdoc and Chrome blocks them.
+    void this.rewriteDocFonts(doc)
     this.syncDocTouchAction(doc)
 
     // Re-apply search marks when chapter iframe mounts / remounts
@@ -611,6 +619,7 @@ export class EpubEngine implements ReaderEngine {
     this.resizeObserver?.disconnect()
     this.resizeObserver = null
     this.mark.reset()
+    revokeFontUrlCache(this.fontUrlCache)
     try {
       const contents = (
         this.rendition as unknown as { getContents?: () => ContentsDoc[] }
@@ -1231,6 +1240,32 @@ html body h6 {
       theme,
       bg: vars['--reader-bg'],
       fg: vars['--reader-fg'],
+    }
+  }
+
+  private registerFontSerializeHook() {
+    const spine = this.book?.spine as unknown as {
+      hooks?: { serialize?: { register: (fn: (output: string, section: { output: string }) => Promise<void>) => void } }
+    } | null
+    const hook = spine?.hooks?.serialize
+    if (!hook) return
+    hook.register(async (output, section) => {
+      if (!this.book) return
+      try {
+        const next = await rewriteHtmlFontUrls(String(output ?? section.output ?? ''), this.book, this.fontUrlCache)
+        section.output = next
+      } catch (err) {
+        console.warn('epub html font rewrite failed', err)
+      }
+    })
+  }
+
+  private async rewriteDocFonts(doc: Document) {
+    if (!this.book) return
+    try {
+      await rewriteEpubFontUrls(doc, this.book, this.fontUrlCache)
+    } catch (err) {
+      console.warn('epub font url rewrite failed', err)
     }
   }
 
