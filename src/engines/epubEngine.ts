@@ -190,7 +190,7 @@ export class EpubEngine implements ReaderEngine {
     }
 
     try {
-      this.rendition.resize(w, h)
+      ;(this.rendition as unknown as { resize: (w: number, h: number) => void }).resize(w, h)
     } catch (err) {
       console.warn('epub resize failed', err)
       return
@@ -500,7 +500,12 @@ export class EpubEngine implements ReaderEngine {
   /** Advance/rewind and wait until epub.js finishes relocating (layout stable). */
   private async turnPage(dir: 'next' | 'prev') {
     if (!this.rendition) return
-    const rendition = this.rendition
+    const rendition = this.rendition as unknown as {
+      on: (e: string, fn: () => void) => void
+      off: (e: string, fn: () => void) => void
+      next: () => Promise<unknown>
+      prev: () => Promise<unknown>
+    }
     const relocated = new Promise<void>((resolve) => {
       const timer = window.setTimeout(() => {
         rendition.off('relocated', onRelocated)
