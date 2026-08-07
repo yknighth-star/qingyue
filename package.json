@@ -1,0 +1,35 @@
+{
+  "name": "qingyue",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "postinstall": "node scripts/fetch-tessdata.mjs && node scripts/patch-epubjs-pagehide.mjs",
+    "tessdata": "node scripts/fetch-tessdata.mjs",
+    "patch:epubjs": "node scripts/patch-epubjs-pagehide.mjs",
+    "push:proxy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/git-proxy.ps1 push",
+    "pull:proxy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/git-proxy.ps1 pull"
+  },
+  "dependencies": {
+    "dexie": "^4.0.11",
+    "epubjs": "^0.3.93",
+    "jszip": "^3.10.1",
+    "pdfjs-dist": "^4.10.38",
+    "pinia": "^2.3.1",
+    "tesseract.js": "^7.0.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.7",
+    "vite-plugin-pwa": "^0.21.1",
+    "vue-tsc": "^2.2.0",
+    "workbox-window": "^7.3.0"
+  }
+}

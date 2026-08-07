@@ -1,0 +1,693 @@
+/* 仿真 / 横滑：分页动效挂在引擎根节点 — 勿给 EPUB 常驻 will-change（会抖字） */
+.txt-reader,
+.pdf-reader {
+  position: relative;
+  transform-style: preserve-3d;
+  will-change: transform, opacity, filter, box-shadow;
+  backface-visibility: hidden;
+}
+
+.epub-reader {
+  position: relative;
+  backface-visibility: hidden;
+}
+
+/* —— 横滑：双层内容滑动（ghost + live） —— */
+.page-slide-ghost {
+  pointer-events: none;
+  box-sizing: border-box;
+  contain: paint;
+}
+
+.page-slide-ghost-epub {
+  overflow: hidden !important;
+}
+
+.page-slide-iframe-snap {
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.slide-hold {
+  opacity: 0 !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.slide-out-next,
+.slide-out-prev,
+.slide-in-next,
+.slide-in-prev {
+  pointer-events: none;
+}
+
+.slide-out-next {
+  animation: pageSlideOutNext 0.24s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.slide-out-prev {
+  animation: pageSlideOutPrev 0.24s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.slide-in-next {
+  animation: pageSlideInNext 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.slide-in-prev {
+  animation: pageSlideInPrev 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+@keyframes pageSlideOutNext {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-28%);
+    opacity: 0;
+  }
+}
+
+@keyframes pageSlideOutPrev {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(28%);
+    opacity: 0;
+  }
+}
+
+@keyframes pageSlideInNext {
+  from {
+    transform: translateX(36%);
+    opacity: 0.35;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes pageSlideInPrev {
+  from {
+    transform: translateX(-36%);
+    opacity: 0.35;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* 仿真跟手预览（松手后走完整 / 轻量 curl 动画） */
+.reader-stage.curl-drag .engine-host > *:not(.epub-reader) {
+  transform-origin: left center;
+  transition: none;
+  will-change: transform;
+}
+
+.reader-stage.curl-drag-next .engine-host > *:not(.epub-reader) {
+  transform: perspective(1800px) rotateY(calc(var(--curl-drag, 0) * -68deg));
+  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.18));
+  box-shadow: calc(var(--curl-drag, 0) * -18px) 0 28px rgba(0, 0, 0, 0.2);
+}
+
+.reader-stage.curl-drag-prev .engine-host > *:not(.epub-reader) {
+  transform-origin: right center;
+  transform: perspective(1800px) rotateY(calc(var(--curl-drag, 0) * 68deg));
+  filter: brightness(calc(1 - var(--curl-drag, 0) * 0.18));
+  box-shadow: calc(var(--curl-drag, 0) * 18px) 0 28px rgba(0, 0, 0, 0.2);
+}
+
+/* 横滑跟手：整页平移（与仿真旋转明确区分） */
+.reader-stage.slide-drag .engine-host > *:not(.epub-reader) {
+  transition: none;
+  will-change: transform;
+}
+
+.reader-stage.slide-drag-next .engine-host > *:not(.epub-reader) {
+  transform: translate3d(calc(var(--slide-drag, 0) * -100%), 0, 0);
+}
+
+.reader-stage.slide-drag-prev .engine-host > *:not(.epub-reader) {
+  transform: translate3d(calc(var(--slide-drag, 0) * 100%), 0, 0);
+}
+
+/* EPUB: never apply live curl-drag transform */
+.reader-stage.curl-drag .engine-host > .epub-reader,
+.reader-stage.slide-drag .engine-host > .epub-reader {
+  transform: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+  will-change: auto !important;
+}
+
+.curl-hold {
+  opacity: 0 !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.page-curl-ghost {
+  pointer-events: none;
+  box-sizing: border-box;
+  contain: paint;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+}
+
+.curl-out-next,
+.curl-out-prev,
+.curl-in-next,
+.curl-in-prev,
+.curl-under-next,
+.curl-under-prev {
+  pointer-events: none;
+}
+
+/* 折痕光影（幽灵翻出层） */
+.curl-out-next::after,
+.curl-out-prev::after,
+.curl-in-next::after,
+.curl-in-prev::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.curl-out-next::after {
+  background: linear-gradient(
+    to left,
+    rgba(0, 0, 0, 0.32) 0%,
+    rgba(0, 0, 0, 0.08) 28%,
+    transparent 55%
+  );
+  animation: foldShadeOut 0.38s ease-in forwards;
+}
+
+.curl-out-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.32) 0%,
+    rgba(0, 0, 0, 0.08) 28%,
+    transparent 55%
+  );
+  animation: foldShadeOut 0.38s ease-in forwards;
+}
+
+.curl-in-next::after,
+.curl-in-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.12) 0%,
+    transparent 40%
+  );
+  animation: foldShadeIn 0.3s ease-out forwards;
+}
+
+@keyframes foldShadeOut {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes foldShadeIn {
+  from {
+    opacity: 0.7;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/*
+ * 下一页：右手揭页，绕左侧书脊翻向左边（读者视角从右向左翻）
+ * 上一页：左手揭页，绕右侧翻回（从左向右）
+ * 双层：幽灵层 curl-out；底层新页 curl-under（始终可见）
+ */
+.curl-out-next {
+  transform-origin: left center;
+  animation: simOutNext 0.38s cubic-bezier(0.4, 0.0, 0.6, 1) forwards;
+}
+
+.curl-out-prev {
+  transform-origin: right center;
+  animation: simOutPrev 0.38s cubic-bezier(0.4, 0.0, 0.6, 1) forwards;
+}
+
+.curl-in-next {
+  transform-origin: left center;
+  animation: simInNext 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-in-prev {
+  transform-origin: right center;
+  animation: simInPrev 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-under-next {
+  transform-origin: left center;
+  animation: simUnderNext 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-under-prev {
+  transform-origin: right center;
+  animation: simUnderPrev 0.3s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+/* —— 轻量仿真（手机 / 触摸）：角度略小、更快，但绝非平移 —— */
+.curl-lite-out-next {
+  transform-origin: left center;
+  animation: liteOutNext 0.3s cubic-bezier(0.4, 0.0, 0.55, 1) forwards;
+}
+
+.curl-lite-out-prev {
+  transform-origin: right center;
+  animation: liteOutPrev 0.3s cubic-bezier(0.4, 0.0, 0.55, 1) forwards;
+}
+
+.curl-under-lite-next {
+  transform-origin: left center;
+  animation: liteUnderNext 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-under-lite-prev {
+  transform-origin: right center;
+  animation: liteUnderPrev 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+.curl-lite-out-next::after,
+.curl-lite-out-prev::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.curl-lite-out-next::after {
+  background: linear-gradient(
+    to left,
+    rgba(0, 0, 0, 0.28) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    transparent 58%
+  );
+}
+
+.curl-lite-out-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.28) 0%,
+    rgba(0, 0, 0, 0.06) 30%,
+    transparent 58%
+  );
+}
+
+@keyframes liteOutNext {
+  0% {
+    transform: perspective(1600px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(1600px) rotateY(-78deg);
+    filter: brightness(0.78);
+    opacity: 0;
+    box-shadow: -22px 0 36px rgba(0, 0, 0, 0.26);
+  }
+}
+
+@keyframes liteOutPrev {
+  0% {
+    transform: perspective(1600px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(1600px) rotateY(78deg);
+    filter: brightness(0.78);
+    opacity: 0;
+    box-shadow: 22px 0 36px rgba(0, 0, 0, 0.26);
+  }
+}
+
+@keyframes liteUnderNext {
+  0% {
+    transform: perspective(1600px) translateX(4%) rotateY(-4deg);
+    filter: brightness(0.95);
+  }
+  100% {
+    transform: perspective(1600px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+@keyframes liteUnderPrev {
+  0% {
+    transform: perspective(1600px) translateX(-4%) rotateY(4deg);
+    filter: brightness(0.95);
+  }
+  100% {
+    transform: perspective(1600px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+/* EPUB soft-cover: column ghost paper or solid fallback */
+.page-epub-turn-paper,
+.page-epub-turn-cover {
+  background: var(--reader-bg, #f3ead3);
+}
+
+/* Fold shade only while curling — keep alpha modest so peels never read as a black plate */
+.page-epub-turn-curl::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.page-epub-turn-curl.page-epub-turn-next::after {
+  background: linear-gradient(
+    to left,
+    rgba(0, 0, 0, 0.18) 0%,
+    rgba(0, 0, 0, 0.05) 28%,
+    transparent 55%
+  );
+}
+
+.page-epub-turn-curl.page-epub-turn-prev::after {
+  background: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 0.18) 0%,
+    rgba(0, 0, 0, 0.05) 28%,
+    transparent 55%
+  );
+}
+
+@keyframes simOutNext {
+  0% {
+    transform: perspective(2200px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: 0 0 0 transparent;
+  }
+  45% {
+    transform: perspective(2200px) rotateY(-48deg);
+    filter: brightness(0.94);
+    opacity: 1;
+    box-shadow: -12px 0 28px rgba(0, 0, 0, 0.18);
+  }
+  100% {
+    transform: perspective(2200px) rotateY(-98deg);
+    filter: brightness(0.72);
+    opacity: 0;
+    box-shadow: -28px 0 40px rgba(0, 0, 0, 0.28);
+  }
+}
+
+@keyframes simOutPrev {
+  0% {
+    transform: perspective(2200px) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: 0 0 0 transparent;
+  }
+  45% {
+    transform: perspective(2200px) rotateY(48deg);
+    filter: brightness(0.94);
+    opacity: 1;
+    box-shadow: 12px 0 28px rgba(0, 0, 0, 0.18);
+  }
+  100% {
+    transform: perspective(2200px) rotateY(98deg);
+    filter: brightness(0.72);
+    opacity: 0;
+    box-shadow: 28px 0 40px rgba(0, 0, 0, 0.28);
+  }
+}
+
+/* 双层底层：新页内容始终可读，仅轻微落定 */
+@keyframes simUnderNext {
+  0% {
+    transform: perspective(2200px) translateX(6%) rotateY(-5deg);
+    filter: brightness(0.94);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+@keyframes simUnderPrev {
+  0% {
+    transform: perspective(2200px) translateX(-6%) rotateY(5deg);
+    filter: brightness(0.94);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+  }
+}
+
+/* 旧单层入场（遗留） */
+@keyframes simInNext {
+  0% {
+    transform: perspective(2200px) translateX(10%) rotateY(-6deg);
+    filter: brightness(0.9);
+    opacity: 0.45;
+    box-shadow: inset 18px 0 36px rgba(0, 0, 0, 0.1);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+@keyframes simInPrev {
+  0% {
+    transform: perspective(2200px) translateX(-10%) rotateY(6deg);
+    filter: brightness(0.9);
+    opacity: 0.45;
+    box-shadow: inset -18px 0 36px rgba(0, 0, 0, 0.1);
+  }
+  100% {
+    transform: perspective(2200px) translateX(0) rotateY(0deg);
+    filter: brightness(1);
+    opacity: 1;
+    box-shadow: inset 0 0 0 transparent;
+  }
+}
+
+/* 上下滑动：取消左右翻页热区 */
+.reader-page[data-turn='scroll'] .edge-zone {
+  display: none;
+}
+
+.reader-page[data-turn='curl'] .reader-stage,
+.reader-page[data-turn='slide'] .reader-stage {
+  perspective: 2200px;
+  overflow: hidden;
+  background: var(--reader-bg, #f3ead3);
+  /* Coarse/phone: none so swipe isn't stolen; mark-mode overrides to auto */
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+.reader-page[data-pointer='fine'][data-turn='curl'] .reader-stage,
+.reader-page[data-pointer='fine'][data-turn='slide'] .reader-stage {
+  touch-action: manipulation;
+}
+
+.reader-page[data-turn='scroll'] .reader-stage {
+  touch-action: pan-y;
+  overscroll-behavior-y: contain;
+}
+
+/* EPUB live drag: never transform .epub-reader (breaks column metrics) */
+.reader-stage.curl-drag .engine-host > .epub-reader,
+.reader-stage.slide-drag .engine-host > .epub-reader {
+  transform: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+  will-change: auto !important;
+}
+
+/* 横滑 / 仿真：PDF 一屏一页，尽量铺满视口（由 JS contain 计算尺寸） */
+.pdf-pages[data-turn='slide'],
+.pdf-pages[data-turn='curl'],
+.pdf-reader[data-turn='slide'] .pdf-pages,
+.pdf-reader[data-turn='curl'] .pdf-pages {
+  overflow: hidden !important;
+  scroll-behavior: auto !important;
+  /* Claim horizontal pans for JS page-turn; avoid browser scroll steal */
+  touch-action: none;
+  padding: 0 !important;
+  gap: 0 !important;
+  /* safe: prefer keeping the start edge visible if a page is still slightly oversized */
+  justify-content: safe center !important;
+  align-items: safe center !important;
+}
+
+.pdf-pages[data-turn='slide'] .pdf-page,
+.pdf-pages[data-turn='curl'] .pdf-page,
+.pdf-reader[data-turn='slide'] .pdf-page,
+.pdf-reader[data-turn='curl'] .pdf-page {
+  display: none !important;
+  /* Cap to clip box — engine also sets explicit px; this blocks left-edge crop on phones */
+  max-width: 100% !important;
+  max-height: 100% !important;
+  margin: 0 !important;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
+  flex-shrink: 0 !important;
+  box-sizing: border-box !important;
+}
+
+.pdf-pages[data-turn='slide'] .pdf-page[data-active='1'],
+.pdf-pages[data-turn='curl'] .pdf-page[data-active='1'],
+.pdf-reader[data-turn='slide'] .pdf-page[data-active='1'],
+.pdf-reader[data-turn='curl'] .pdf-page[data-active='1'] {
+  display: block !important;
+  visibility: visible !important;
+}
+
+.pdf-pages[data-turn='slide'] .pdf-page canvas,
+.pdf-pages[data-turn='curl'] .pdf-page canvas,
+.pdf-reader[data-turn='slide'] .pdf-page canvas,
+.pdf-reader[data-turn='curl'] .pdf-page canvas {
+  /* Engine sets explicit CSS px; do not override width/height (keeps aspect). */
+  display: block !important;
+}
+
+.txt-content[data-turn='slide'],
+.txt-content[data-turn='curl'] {
+  overflow-y: hidden !important;
+  scroll-behavior: auto !important;
+  touch-action: manipulation;
+}
+
+.txt-content.select-mode,
+.pdf-pages.select-mode {
+  touch-action: auto !important;
+}
+
+.txt-content[data-turn='scroll'],
+.pdf-pages[data-turn='scroll'] {
+  overflow-y: auto !important;
+  scroll-behavior: smooth;
+}
+
+.seg-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.modal {
+  width: min(420px, 100%);
+  background: var(--bg-elevated);
+  border-radius: 16px;
+  padding: 1.1rem;
+  box-shadow: var(--shadow);
+}
+
+.modal h3 {
+  margin: 0 0 0.75rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(26, 31, 46, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.confirm-dialog {
+  width: min(400px, 100%);
+  padding: 1.15rem 1.2rem 1.1rem;
+  border-radius: 14px;
+  background: #f7f2ea;
+  color: #1a1f2e;
+  border: 1px solid rgba(26, 31, 46, 0.1);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+}
+
+.confirm-title {
+  margin: 0 0 0.65rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #1a1f2e;
+}
+
+.confirm-message {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: #3b4558;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 1.15rem;
+}
+
+.confirm-dialog .btn.ghost {
+  background: transparent;
+  border-color: rgba(26, 31, 46, 0.22);
+  color: #1a1f2e;
+}
+
+.confirm-dialog .btn.primary {
+  background: var(--accent, #c4a574);
+  color: #1a1f2e;
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.confirm-dialog .btn.danger {
+  background: #c45c5c;
+  color: #fff;
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.stats-chip {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
