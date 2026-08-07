@@ -109,14 +109,24 @@ export class PdfEngine implements ReaderEngine {
     if (this.pageTurn === 'scroll') {
       this.pagesEl.style.overflowY = 'auto'
       this.pagesEl.style.scrollBehavior = 'smooth'
+      this.pagesEl.style.touchAction = this.selectMode ? 'auto' : 'pan-y'
     } else {
       // 横滑 / 仿真：整页锁定，不自由纵滑
       this.pagesEl.style.overflow = 'hidden'
       this.pagesEl.style.overflowY = 'hidden'
       this.pagesEl.style.scrollBehavior = 'auto'
+      this.pagesEl.style.touchAction = this.selectMode ? 'auto' : 'none'
       this.pagesEl.scrollTop = 0
     }
     this.syncActivePage()
+  }
+
+  /** Re-fit after stage / float-chrome / visualViewport size changes. */
+  resizeToContainer() {
+    if (!this.pdf || !this.pagesEl) return
+    void this.renderVisible(true).then(() => {
+      if (this.pageTurn !== 'scroll') this.scrollToPage(this.page)
+    })
   }
 
   /** Slide/curl: only the current page is visible; neighbors stay hidden for prefetch. */
@@ -420,7 +430,13 @@ export class PdfEngine implements ReaderEngine {
     const el = this.pagesEl
     if (!el) return
     el.classList.toggle('select-mode', active)
-    el.style.touchAction = active ? 'auto' : ''
+    if (active) {
+      el.style.touchAction = 'auto'
+    } else if (this.pageTurn === 'scroll') {
+      el.style.touchAction = 'pan-y'
+    } else {
+      el.style.touchAction = 'none'
+    }
   }
 
   clearNativeSelection() {
@@ -547,19 +563,45 @@ export class PdfEngine implements ReaderEngine {
     this.resizeObserver.observe(el)
   }
 
+  /**
+   * Visible box for contain-fit. Intersects element box with visualViewport so
+   * Safari URL / toolbars don't clip the fitted page. Float chrome insets come
+   * from .engine-host padding (chrome-float / chrome-on).
+   */
+  private getFitBox() {
+    const el = this.pagesEl || this.container
+    let width = el?.clientWidth || 800
+    let height = el?.clientHeight || 600
+
+    if (el && typeof window !== 'undefined') {
+      const rect = el.getBoundingClientRect()
+      width = Math.max(1, rect.width)
+      height = Math.max(1, rect.height)
+      const vv = window.visualViewport
+      if (vv) {
+        const top = Math.max(rect.top, vv.offsetTop)
+        const bottom = Math.min(rect.bottom, vv.offsetTop + vv.height)
+        const left = Math.max(rect.left, vv.offsetLeft)
+        const right = Math.min(rect.right, vv.offsetLeft + vv.width)
+        width = Math.max(1, right - left)
+        height = Math.max(1, bottom - top)
+      }
+    }
+
+    return {
+      width: Math.max(160, width),
+      height: Math.max(160, height),
+    }
+  }
+
   private getRenderMetrics(pageWidthAtScale1: number, pageHeightAtScale1: number) {
     const paged = this.isPagedTurn()
-    // Paged: use nearly full stage so the page fills the phone screen (contain).
+    // Paged: use nearly full visible stage so the page fills the phone screen (contain).
     const padX = paged ? 4 : 24
     const padY = paged ? 4 : 24
-    const containerWidth = Math.max(
-      160,
-      (this.pagesEl?.clientWidth || this.container?.clientWidth || 800) - padX,
-    )
-    const containerHeight = Math.max(
-      160,
-      (this.pagesEl?.clientHeight || this.container?.clientHeight || 600) - padY,
-    )
+    const box = this.getFitBox()
+    const containerWidth = Math.max(160, box.width - padX)
+    const containerHeight = Math.max(160, box.height - padY)
     let fitScale = (containerWidth / Math.max(1, pageWidthAtScale1)) * this.userZoom
     if (paged) {
       const heightScale = (containerHeight / Math.max(1, pageHeightAtScale1)) * this.userZoom

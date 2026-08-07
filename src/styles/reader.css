@@ -191,6 +191,18 @@
   flex: 1;
 }
 
+/* Float chrome: shrink engine content box so PDF/TXT contain-fit stays readable */
+.reader-page.chrome-float .engine-host {
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.reader-page.chrome-float.chrome-on .engine-host {
+  padding-top: calc(3.6rem + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(7.2rem + env(safe-area-inset-bottom, 0px));
+}
+
 .reader-float-chrome {
   position: absolute;
   inset: 0;

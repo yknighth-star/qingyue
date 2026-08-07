@@ -88,10 +88,33 @@ function staticAssetsPlugin(): Plugin {
   }
 }
 
+/**
+ * epub.js uses window "unload" for manager destroy; Chrome denies unload via
+ * Permissions-Policy and logs a violation. Map those registrations to pagehide.
+ */
+function epubJsPagehidePlugin(): Plugin {
+  const re = /addEventListener\(\s*(["'])unload\1/g
+  return {
+    name: 'epubjs-pagehide',
+    enforce: 'pre',
+    transform(code, id) {
+      const norm = id.replace(/\\/g, '/')
+      if (!norm.includes('/epubjs/')) return
+      if (!re.test(code)) return
+      re.lastIndex = 0
+      return {
+        code: code.replace(re, 'addEventListener($1pagehide$1'),
+        map: null,
+      }
+    },
+  }
+}
+
 export default defineConfig({
   base,
   plugins: [
     vue(),
+    epubJsPagehidePlugin(),
     staticAssetsPlugin(),
     VitePWA({
       registerType: 'autoUpdate',

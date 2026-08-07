@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
-    "postinstall": "node scripts/fetch-tessdata.mjs",
+    "postinstall": "node scripts/fetch-tessdata.mjs && node scripts/patch-epubjs-pagehide.mjs",
     "tessdata": "node scripts/fetch-tessdata.mjs",
+    "patch:epubjs": "node scripts/patch-epubjs-pagehide.mjs",
     "push:proxy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/git-proxy.ps1 push",
     "pull:proxy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/git-proxy.ps1 pull"
   },

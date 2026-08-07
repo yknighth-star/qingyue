@@ -232,8 +232,9 @@ mark.search-hit {
   align-items: center;
   cursor: default;
   caret-color: transparent;
-  -webkit-user-select: text;
-  user-select: text;
+  /* Reading taps/swipes win; mark/select mode re-enables selection below */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .pdf-page {
@@ -252,11 +253,20 @@ mark.search-hit {
   overflow: hidden;
   line-height: 1;
   opacity: 1;
-  cursor: text;
+  cursor: default;
   caret-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  /* Let stage receive taps/swipes unless selecting */
+  pointer-events: none;
+}
+
+.pdf-pages.select-mode .pdf-text-layer,
+.reader-page.mark-mode .pdf-text-layer {
+  pointer-events: auto;
+  cursor: text;
   -webkit-user-select: text;
   user-select: text;
-  pointer-events: auto;
 }
 
 .pdf-text-layer span {
@@ -264,7 +274,9 @@ mark.search-hit {
   white-space: pre;
   color: transparent;
   transform-origin: 0% 0%;
-  cursor: text;
+  cursor: inherit;
+  -webkit-user-select: inherit;
+  user-select: inherit;
 }
 
 /* Forms / chrome keep normal text caret */

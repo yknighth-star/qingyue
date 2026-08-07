@@ -60,18 +60,20 @@ export function resolveTurnProfile(width = typeof window !== 'undefined' ? windo
   // Live curl preview only when fine pointer can drag precisely; never rely on it for coarse-only.
   const liveCurlPreview = fine && curlAnim === 'full-curl'
 
-  let edgeWidth = 0.11
-  if (deviceFromWidth === 'tablet') edgeWidth = 0.13
-  if (deviceFromWidth === 'desktop' && fine) edgeWidth = 0.09
+  // Phone/tablet: Kindle-like side thirds so thumbs reliably hit turn zones.
+  // Desktop fine pointer: narrower hover edges.
+  let edgeWidth = 0.3
+  if (deviceFromWidth === 'tablet') edgeWidth = 0.28
+  if (deviceFromWidth === 'desktop') edgeWidth = fine ? 0.09 : 0.2
 
   let swipeWidthFactor = 0.18
   let swipeMinPx = 48
   if (deviceFromWidth === 'phone') {
+    swipeWidthFactor = 0.12
+    swipeMinPx = 36
+  } else if (deviceFromWidth === 'tablet') {
     swipeWidthFactor = 0.14
     swipeMinPx = 40
-  } else if (deviceFromWidth === 'tablet') {
-    swipeWidthFactor = 0.16
-    swipeMinPx = 44
   }
 
   return {

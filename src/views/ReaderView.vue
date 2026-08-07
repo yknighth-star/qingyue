@@ -282,9 +282,16 @@ watch(themeMode, () => {
 
 watch(chromeVisible, async () => {
   await nextTick()
-  // Float chrome overlays the stage — no size change, skip epub resize (avoids shake).
-  if (!desktopUi.value) return
-  requestAnimationFrame(() => engine.value?.resizeToContainer?.())
+  // Desktop bar chrome changes stage size; float chrome changes PDF fit insets.
+  const fmt = book.value?.format
+  if (desktopUi.value) {
+    requestAnimationFrame(() => engine.value?.resizeToContainer?.())
+    return
+  }
+  // Float overlay: EPUB skip full resize (column shake); PDF/TXT re-fit visible box.
+  if (fmt === 'pdf' || fmt === 'txt') {
+    requestAnimationFrame(() => engine.value?.resizeToContainer?.())
+  }
 })
 
 watch(
@@ -407,6 +414,23 @@ function refreshPointerMode() {
   }
 }
 
+/** Edge width CSS var for tap zones (phone ~30%, desktop fine ~9%). */
+const fitInsetStyle = computed(() => ({
+  '--edge-width': `${turnProfile.value.edgeWidth * 100}%`,
+}))
+
+let visualViewportTimer: number | null = null
+function onVisualViewportChange() {
+  if (visualViewportTimer) window.clearTimeout(visualViewportTimer)
+  visualViewportTimer = window.setTimeout(() => {
+    visualViewportTimer = null
+    const fmt = book.value?.format
+    if (fmt === 'pdf' || fmt === 'txt') {
+      engine.value?.resizeToContainer?.()
+    }
+  }, 120)
+}
+
 function clearUiSelection() {
   window.getSelection()?.removeAllRanges()
 }
@@ -449,6 +473,8 @@ async function boot() {
 onMounted(async () => {
   refreshPointerMode()
   window.addEventListener('resize', refreshPointerMode)
+  window.visualViewport?.addEventListener('resize', onVisualViewportChange)
+  window.visualViewport?.addEventListener('scroll', onVisualViewportChange)
   systemColorMql = window.matchMedia('(prefers-color-scheme: dark)')
   systemColorMql.addEventListener('change', onSystemColorScheme)
   themeTickTimer = window.setInterval(bumpThemeTick, 60_000)
@@ -464,6 +490,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('resize', refreshPointerMode)
+  window.visualViewport?.removeEventListener('resize', onVisualViewportChange)
+  window.visualViewport?.removeEventListener('scroll', onVisualViewportChange)
+  if (visualViewportTimer) window.clearTimeout(visualViewportTimer)
+  visualViewportTimer = null
   systemColorMql?.removeEventListener('change', onSystemColorScheme)
   systemColorMql = null
   if (themeTickTimer) window.clearInterval(themeTickTimer)
@@ -482,6 +512,7 @@ onBeforeUnmount(() => {
     :class="{
       desktop: desktopUi,
       'chrome-float': floatChrome,
+      'chrome-on': floatChrome && chromeVisible,
       'annot-active': annotUiActive,
       'mark-mode': markMode,
       'panel-open': panel !== 'none',
@@ -491,7 +522,7 @@ onBeforeUnmount(() => {
     :data-device="turnProfile.device"
     :data-anim="turnProfile.curlAnim"
     :data-pointer="turnProfile.fine ? 'fine' : 'coarse'"
-    :style="{ '--edge-width': `${turnProfile.edgeWidth * 100}%` }"
+    :style="fitInsetStyle"
   >
     <header
       v-if="!floatChrome"

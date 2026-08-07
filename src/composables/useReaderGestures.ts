@@ -1,9 +1,9 @@
-﻿import type { Ref } from 'vue'
+import type { Ref } from 'vue'
 import type { ReaderEngine } from '@/engines/types'
 import type { ContentGestureEvent, ContentTapEvent } from '@/engines/types'
 import type { BookRecord, PageTurnMode } from '@/types'
 import type { ReaderPanel } from './useReaderChrome'
-import { resolveTurnProfile, type TurnProfile } from '@/utils/turnProfile'
+import type { TurnProfile } from '@/utils/turnProfile'
 
 export function useReaderGestures(opts: {
   engine: Ref<ReaderEngine | null>
@@ -14,7 +14,7 @@ export function useReaderGestures(opts: {
   turnProfile: () => TurnProfile
   shouldBlockTapActions: () => boolean
   hasTextSelection: () => boolean
-  /** 划线模式：长按进入后禁止翻页，直到关�?*/
+  /** 划线模式：长按进入后禁止翻页，直到关闭 */
   markMode: Ref<boolean>
   selectionBar: Ref<unknown>
   getIgnoreTapUntil: () => number
@@ -111,15 +111,22 @@ export function useReaderGestures(opts: {
     return false
   }
 
+  /** Normalize tap X to stage [0,1]; clamp so mapping noise still hits edge zones. */
+  function stageTapX(clientX: number): number | null {
+    const stage = opts.stageRef.value
+    if (!stage) return null
+    const rect = stage.getBoundingClientRect()
+    const w = Math.max(1, rect.width)
+    return Math.min(1, Math.max(0, (clientX - rect.left) / w))
+  }
+
   function onStageClick(e: MouseEvent) {
     if (opts.panel.value !== 'none') return
     if (Date.now() < opts.getIgnoreTapUntil() || Date.now() < ignoreClickUntil) return
     if (dismissMarkOrChrome()) return
     if (opts.hasTextSelection()) return
-    const stage = opts.stageRef.value
-    if (!stage) return
-    const rect = stage.getBoundingClientRect()
-    const x = (e.clientX - rect.left) / rect.width
+    const x = stageTapX(e.clientX)
+    if (x == null) return
     if (!isScrollMode()) {
       const edge = edgeFrac()
       if (x < edge) {
@@ -143,24 +150,20 @@ export function useReaderGestures(opts: {
     if (ev.hasSelection || Date.now() < opts.getIgnoreTapUntil() || Date.now() < ignoreClickUntil) return
     if (dismissMarkOrChrome()) return
     if (opts.hasTextSelection()) return
-    const stage = opts.stageRef.value
-    if (!stage) {
+    const x = stageTapX(ev.clientX)
+    if (x == null) {
       opts.toggleChrome()
       return
     }
     if (!isScrollMode()) {
-      const rect = stage.getBoundingClientRect()
-      const x = (ev.clientX - rect.left) / Math.max(1, rect.width)
       const edge = edgeFrac()
-      if (x > 0 && x < 1) {
-        if (x < edge) {
-          onEdgeTurn('prev')
-          return
-        }
-        if (x > 1 - edge) {
-          onEdgeTurn('next')
-          return
-        }
+      if (x < edge) {
+        onEdgeTurn('prev')
+        return
+      }
+      if (x > 1 - edge) {
+        onEdgeTurn('next')
+        return
       }
     }
     opts.toggleChrome()

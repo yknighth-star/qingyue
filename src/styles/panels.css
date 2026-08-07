@@ -425,12 +425,24 @@
   top: 10%;
   bottom: 10%;
   width: var(--edge-width, 11%);
-  z-index: 5;
+  z-index: 12;
   /* Keep clear of native scrollbars so drag/hover isn't stolen */
   --scrollbar-gutter: 16px;
+  /* iOS: transparent overlays often miss touches — keep a near-invisible paint */
+  background: rgba(0, 0, 0, 0.001);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  pointer-events: auto;
 }
 
-.reader-page.annot-active .edge-zone {
+/* Phone / tablet float chrome: full-height hit targets (thumbs reach edges) */
+.reader-page.chrome-float .edge-zone {
+  top: 0;
+  bottom: 0;
+}
+
+.reader-page.annot-active .edge-zone,
+.reader-page.mark-mode .edge-zone {
   pointer-events: none;
 }
 

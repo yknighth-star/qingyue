@@ -499,9 +499,14 @@
   perspective: 2200px;
   overflow: hidden;
   background: var(--reader-bg, #f3ead3);
-  /* Allow native text selection / long-press; swipe handled in JS after threshold */
-  touch-action: manipulation;
+  /* Coarse/phone: none so swipe isn't stolen; mark-mode overrides to auto */
+  touch-action: none;
   overscroll-behavior: none;
+}
+
+.reader-page[data-pointer='fine'][data-turn='curl'] .reader-stage,
+.reader-page[data-pointer='fine'][data-turn='slide'] .reader-stage {
+  touch-action: manipulation;
 }
 
 .reader-page[data-turn='scroll'] .reader-stage {
@@ -525,7 +530,8 @@
 .pdf-reader[data-turn='curl'] .pdf-pages {
   overflow: hidden !important;
   scroll-behavior: auto !important;
-  touch-action: manipulation;
+  /* Claim horizontal pans for JS page-turn; avoid browser scroll steal */
+  touch-action: none;
   padding: 0 !important;
   gap: 0 !important;
   justify-content: center !important;
