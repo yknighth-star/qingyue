@@ -564,48 +564,60 @@ export class PdfEngine implements ReaderEngine {
   }
 
   /**
-   * Visible box for contain-fit. Intersects element box with visualViewport so
-   * Safari URL / toolbars don't clip the fitted page. Float chrome insets come
-   * from .engine-host padding (chrome-float / chrome-on).
+   * Layout box for contain-fit. Prefer clientWidth/Height (what overflow:hidden
+   * clips against). visualViewport may only SHRINK the box — never inflate it
+   * (mobile browsers often report a wider intersection than the clip box).
    */
   private getFitBox() {
     const el = this.pagesEl || this.container
-    let width = el?.clientWidth || 800
-    let height = el?.clientHeight || 600
+    let width = Math.max(0, el?.clientWidth ?? 0)
+    let height = Math.max(0, el?.clientHeight ?? 0)
+
+    if (el && (width < 8 || height < 8)) {
+      const rect = el.getBoundingClientRect()
+      width = Math.max(width, rect.width)
+      height = Math.max(height, rect.height)
+    }
 
     if (el && typeof window !== 'undefined') {
-      const rect = el.getBoundingClientRect()
-      width = Math.max(1, rect.width)
-      height = Math.max(1, rect.height)
       const vv = window.visualViewport
       if (vv) {
+        const rect = el.getBoundingClientRect()
         const top = Math.max(rect.top, vv.offsetTop)
         const bottom = Math.min(rect.bottom, vv.offsetTop + vv.height)
         const left = Math.max(rect.left, vv.offsetLeft)
         const right = Math.min(rect.right, vv.offsetLeft + vv.width)
-        width = Math.max(1, right - left)
-        height = Math.max(1, bottom - top)
+        const visW = right - left
+        const visH = bottom - top
+        // Only clamp down — over-wide fitScale was clipping TOC glyphs on the left.
+        if (visW > 8) width = Math.min(width || visW, visW)
+        if (visH > 8) height = Math.min(height || visH, visH)
       }
     }
 
     return {
-      width: Math.max(160, width),
-      height: Math.max(160, height),
+      width: Math.max(160, width || 800),
+      height: Math.max(160, height || 600),
     }
   }
 
   private getRenderMetrics(pageWidthAtScale1: number, pageHeightAtScale1: number) {
     const paged = this.isPagedTurn()
-    // Paged: use nearly full visible stage so the page fills the phone screen (contain).
-    const padX = paged ? 4 : 24
-    const padY = paged ? 4 : 24
+    // Paged: contain into the clip box (extra pad avoids subpixel overflow on phones).
+    const padX = paged ? 8 : 24
+    const padY = paged ? 8 : 24
     const box = this.getFitBox()
     const containerWidth = Math.max(160, box.width - padX)
     const containerHeight = Math.max(160, box.height - padY)
-    let fitScale = (containerWidth / Math.max(1, pageWidthAtScale1)) * this.userZoom
+    const containW = containerWidth / Math.max(1, pageWidthAtScale1)
+    const containH = containerHeight / Math.max(1, pageHeightAtScale1)
+    const contain = Math.min(containW, containH)
+    // Apply user zoom but never exceed contain in slide/curl (no pan in paged mode).
+    let fitScale = contain * this.userZoom
     if (paged) {
-      const heightScale = (containerHeight / Math.max(1, pageHeightAtScale1)) * this.userZoom
-      fitScale = Math.min(fitScale, heightScale)
+      fitScale = Math.min(fitScale, contain)
+    } else {
+      fitScale = containW * this.userZoom
     }
     const native = Math.max(window.devicePixelRatio || 1, 1)
     const dpr = Math.min(native, maxDprForQuality(this.pdfQuality))
@@ -811,18 +823,34 @@ export class PdfEngine implements ReaderEngine {
 
     const page = await this.pdf.getPage(pageNum)
     const base = page.getViewport({ scale: 1 })
-    const { fitScale, dpr } = this.getRenderMetrics(base.width, base.height)
-    const viewport = page.getViewport({ scale: fitScale })
-    const cssW = Math.floor(viewport.width)
-    const cssH = Math.floor(viewport.height)
+    const { fitScale, dpr, containerWidth, containerHeight } = this.getRenderMetrics(
+      base.width,
+      base.height,
+    )
+    let viewport = page.getViewport({ scale: fitScale })
+    let cssW = Math.floor(viewport.width)
+    let cssH = Math.floor(viewport.height)
+
+    // Hard clamp: never paint a page larger than the clip box (mobile left-edge crop).
+    if (this.isPagedTurn() && (cssW > containerWidth || cssH > containerHeight)) {
+      const s = Math.min(containerWidth / Math.max(1, cssW), containerHeight / Math.max(1, cssH))
+      viewport = page.getViewport({ scale: fitScale * s })
+      cssW = Math.floor(viewport.width)
+      cssH = Math.floor(viewport.height)
+    }
 
     wrap.innerHTML = ''
     wrap.dataset.filled = '1'
     wrap.style.width = `${cssW}px`
-    wrap.style.maxWidth = 'none'
-    wrap.style.maxHeight = 'none'
     wrap.style.height = `${cssH}px`
     wrap.style.minHeight = `${cssH}px`
+    if (this.isPagedTurn()) {
+      wrap.style.maxWidth = `${containerWidth}px`
+      wrap.style.maxHeight = `${containerHeight}px`
+    } else {
+      wrap.style.maxWidth = 'none'
+      wrap.style.maxHeight = 'none'
+    }
 
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
@@ -851,10 +879,13 @@ export class PdfEngine implements ReaderEngine {
     if (this.pageTurn === 'scroll') {
       wrap.style.height = ''
       wrap.style.width = ''
+      wrap.style.maxWidth = ''
+      wrap.style.maxHeight = ''
     } else {
-      // Keep explicit box so CSS max-width cannot shrink the page and reveal a neighbor.
       wrap.style.height = `${cssH}px`
       wrap.style.width = `${cssW}px`
+      wrap.style.maxWidth = `${containerWidth}px`
+      wrap.style.maxHeight = `${containerHeight}px`
     }
 
     const gen = this.textLayerGen
