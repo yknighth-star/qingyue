@@ -1,5 +1,6 @@
 import { db } from '@/db'
 import type { ProgressRecord } from '@/types'
+import { cloneForIdb } from '@/utils/idbClone'
 import { booksRepo } from './booksRepo'
 
 export const progressRepo = {
@@ -13,15 +14,19 @@ export const progressRepo = {
     percent: number,
   ): Promise<{ updatedAt: number }> {
     const updatedAt = Date.now()
-    await db.progress.put({ bookId, locator, percent, updatedAt })
+    await db.progress.put(
+      cloneForIdb({ bookId, locator, percent, updatedAt }),
+    )
     await booksRepo.update(bookId, { progressPercent: percent, lastReadAt: updatedAt })
     return { updatedAt }
   },
 
   async put(record: ProgressRecord): Promise<void> {
-    await db.progress.put({
-      ...record,
-      updatedAt: record.updatedAt ?? Date.now(),
-    })
+    await db.progress.put(
+      cloneForIdb({
+        ...record,
+        updatedAt: record.updatedAt ?? Date.now(),
+      }),
+    )
   },
 }

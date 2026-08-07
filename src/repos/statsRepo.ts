@@ -1,5 +1,6 @@
 import { db } from '@/db'
 import type { StatsRecord } from '@/types'
+import { cloneForIdb } from '@/utils/idbClone'
 
 const emptyStats = (): StatsRecord => ({
   id: 'global',
@@ -18,6 +19,6 @@ export const statsRepo = {
   },
 
   async save(stats: StatsRecord): Promise<void> {
-    await db.stats.put(stats)
+    await db.stats.put(cloneForIdb(stats))
   },
 }

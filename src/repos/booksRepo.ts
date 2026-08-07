@@ -1,6 +1,7 @@
 import { db } from '@/db'
 import { getPlatform } from '@/platform'
 import type { BookRecord } from '@/types'
+import { cloneForIdb } from '@/utils/idbClone'
 
 /** Local book metadata — single write path for future sync hooks. */
 export const booksRepo = {
@@ -18,17 +19,17 @@ export const booksRepo = {
   },
 
   async update(id: string, patch: Partial<BookRecord>): Promise<void> {
-    const next = { ...patch, updatedAt: Date.now() }
+    const next = cloneForIdb({ ...patch, updatedAt: Date.now() })
     await db.books.update(id, next)
   },
 
   async put(book: BookRecord): Promise<void> {
-    await db.books.put({ ...book, updatedAt: book.updatedAt ?? Date.now() })
+    await db.books.put(cloneForIdb({ ...book, updatedAt: book.updatedAt ?? Date.now() }))
   },
 
   /** Atomic IDB import: book row + blob file. */
   async putWithBlob(book: BookRecord, blob: Blob, name: string): Promise<void> {
-    const stamped = { ...book, updatedAt: book.updatedAt ?? Date.now() }
+    const stamped = cloneForIdb({ ...book, updatedAt: book.updatedAt ?? Date.now() })
     await db.transaction('rw', db.books, db.bookFiles, async () => {
       await db.books.put(stamped)
       await db.bookFiles.put({ bookId: book.id, blob, name })

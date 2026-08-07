@@ -1,5 +1,6 @@
 import { db } from '@/db'
 import { DEFAULT_SETTINGS, FONT_PRESETS, type AppearanceMode, type ReaderSettings } from '@/types'
+import { cloneForIdb } from '@/utils/idbClone'
 
 function normalizeFontFamily(fontFamily: string): string {
   if (FONT_PRESETS.some((f) => f.value === fontFamily)) return fontFamily
@@ -41,6 +42,6 @@ export const settingsRepo = {
 
   async save(settings: ReaderSettings): Promise<void> {
     const { autoDark: _legacy, ...clean } = settings as ReaderSettings & { autoDark?: boolean }
-    await db.settings.put({ id: 'reader', ...clean })
+    await db.settings.put(cloneForIdb({ id: 'reader', ...clean }))
   },
 }
