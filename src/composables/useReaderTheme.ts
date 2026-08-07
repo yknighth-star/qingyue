@@ -1,9 +1,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, type Ref } from 'vue'
 import type { ReaderSettings, ThemeMode } from '@/types'
+import { resetBrowserThemeColor, setBrowserThemeColor, themeColorScheme } from '@/utils/browserTheme'
 import { effectiveTheme, THEME_VARS } from '@/utils/format'
 
 /**
  * Appearance theme tick (system / schedule) + CSS vars on the reader page root.
+ * Also syncs mobile browser `theme-color` so the address bar matches reader bg.
  */
 export function useReaderTheme(opts: {
   settings: () => ReaderSettings
@@ -29,10 +31,12 @@ export function useReaderTheme(opts: {
   }
 
   function syncPageTheme() {
+    const mode = themeMode.value
+    const vars = THEME_VARS[mode]
     const el = opts.pageRef.value
-    if (!el) return
-    const vars = THEME_VARS[themeMode.value]
-    Object.entries(vars).forEach(([k, v]) => el.style.setProperty(k, v))
+    if (el) Object.entries(vars).forEach(([k, v]) => el.style.setProperty(k, v))
+    const bg = vars['--reader-bg']
+    if (bg) setBrowserThemeColor(bg, themeColorScheme(mode))
   }
 
   function onAppearanceModeChange(
@@ -55,6 +59,7 @@ export function useReaderTheme(opts: {
     systemColorMql = null
     if (themeTickTimer) window.clearInterval(themeTickTimer)
     themeTickTimer = null
+    resetBrowserThemeColor()
   })
 
   return {

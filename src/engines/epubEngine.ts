@@ -158,9 +158,9 @@ export class EpubEngine implements ReaderEngine {
       // Avoid style thrash on every page: lock once; typography only on new iframes (bindContentEvents).
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
-      // Re-pin theme after page turn — publisher CSS can reappear; avoid forced rewrite
-      // every relocate (dual-column / paginated scroll is sensitive to style thrash).
-      if (this.settings) this.repinThemeStylesOnly(this.settings)
+      // Re-assert theme after page turn — publisher CSS/scripts often repaint late on mobile.
+      // Soft path: stylesheet + html/body only (avoids full subtree thrash on dual-column).
+      if (this.settings) this.reassertThemeColors(this.settings)
     })
 
     // Background location map → stable book-level 当前/总页 (estimate).
@@ -1291,10 +1291,18 @@ html body h6 {
     const observer = new MutationObserver((mutations) => {
       if (this.themeApplyDepth > 0 || performance.now() < this.themeQuietUntil) return
       for (const m of mutations) {
+        if (m.type === 'attributes') {
+          const t = m.target
+          if (t === doc.documentElement || t === doc.body) {
+            reapply()
+            return
+          }
+          continue
+        }
         if (m.type !== 'childList') continue
         for (const n of m.addedNodes) {
           if (!(n instanceof HTMLElement)) continue
-          if (n.id === 'qingyue-theme') continue
+          if (n.id === 'qingyue-theme' || n.id === 'qingyue-typography') continue
           const tag = n.tagName
           if (
             tag === 'STYLE' ||
@@ -1312,11 +1320,17 @@ html body h6 {
     })
     observer.observe(doc.documentElement, {
       childList: true,
+      attributes: true,
+      attributeFilter: ['style', 'class'],
     })
     if (doc.head) observer.observe(doc.head, { childList: true, subtree: true })
     if (doc.body) {
-      // childList only — attribute watching fights epub.js column/spread layout writes.
-      observer.observe(doc.body, { childList: true })
+      // childList + style/class on body — skip deep attribute watch (column layout thrash).
+      observer.observe(doc.body, {
+        childList: true,
+        attributes: true,
+        attributeFilter: ['style', 'class'],
+      })
     }
     this.themeDocGuards.set(doc, observer)
 
@@ -1356,18 +1370,25 @@ html body h6 {
       // Paint surfaces with theme bg (not transparent): nested publisher fills can't peek through.
       // Exclude media + our marks / epub.js highlights.
       // Do NOT set height/min-height on html/body — that desyncs epub.js column pagination / dual spread.
+      const scheme = theme === 'dark' ? 'dark' : 'light'
       styleEl.textContent = `
 html {
+  color-scheme: ${scheme} !important;
   background: ${bg} !important;
   background-color: ${bg} !important;
   color: ${fg} !important;
 }
-html body {
+html body,
+html body[class],
+html body[style] {
   background: ${bg} !important;
   background-color: ${bg} !important;
+  background-image: none !important;
   color: ${fg} !important;
 }
-html body *:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]) {
+html body *:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]),
+html body *[class]:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]),
+html body *[style]:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]) {
   background: ${bg} !important;
   background-color: ${bg} !important;
   background-image: none !important;
@@ -1378,7 +1399,8 @@ html body *::after {
   background-image: none !important;
 }
 html body a,
-html body a[class] {
+html body a[class],
+html body a[style] {
   color: ${fg} !important;
 }
 html body mark,
@@ -1453,9 +1475,14 @@ html body [class*="epubjs-hl"] {
     }
   }
 
-  /** Light touch after page turn: keep stylesheet last without rewriting all surfaces. */
-  private repinThemeStylesOnly(settings: ReaderSettings) {
+  /**
+   * After page turn: ensure theme stylesheet is last and html/body colors stick.
+   * Full subtree rewrite only when the theme style is missing (new iframe).
+   */
+  private reassertThemeColors(settings: ReaderSettings) {
     if (!this.rendition) return
+    const { bg, fg, theme } = this.themeColors(settings)
+    const fp = `${theme}\0${bg}\0${fg}`
     try {
       const contents = (
         this.rendition as unknown as { getContents?: () => ContentsDoc[] }
@@ -1464,8 +1491,29 @@ html body [class*="epubjs-hl"] {
         const doc = c.document
         if (!doc) return
         const styleEl = doc.getElementById('qingyue-theme') as HTMLStyleElement | null
-        if (styleEl) this.pinThemeStyleLast(doc, styleEl)
-        else this.applyThemeColorsToDocument(doc, settings, true)
+        if (!styleEl || doc.documentElement.dataset.qyTheme !== fp) {
+          this.applyThemeColorsToDocument(doc, settings, true)
+          return
+        }
+        this.themeApplyDepth += 1
+        try {
+          this.pinThemeStyleLast(doc, styleEl)
+          const root = doc.documentElement
+          root.style.setProperty('background', bg, 'important')
+          root.style.setProperty('background-color', bg, 'important')
+          root.style.setProperty('color', fg, 'important')
+          const body = doc.body
+          if (body) {
+            body.style.setProperty('background', bg, 'important')
+            body.style.setProperty('background-color', bg, 'important')
+            body.style.setProperty('background-image', 'none', 'important')
+            body.style.setProperty('color', fg, 'important')
+          }
+          this.paintHostSurfaces(doc, bg)
+        } finally {
+          this.themeApplyDepth -= 1
+          this.themeQuietUntil = performance.now() + 80
+        }
       })
     } catch {
       /* */
@@ -1562,8 +1610,9 @@ html body [class*="epubjs-hl"] {
         {
           ...typeface,
           color: `${fg} !important`,
-          background: 'transparent !important',
-          'background-color': 'transparent !important',
+          // Solid theme fill — transparent lets publisher dark/green washes show through.
+          background: `${bg} !important`,
+          'background-color': `${bg} !important`,
         },
       'img, svg, video, canvas': {
         'max-width': '100% !important',
