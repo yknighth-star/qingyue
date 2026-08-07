@@ -65,6 +65,12 @@ function onDualColumn(checked: boolean) {
 function setAutoScrollPreset(speed: number) {
   emit('update', { autoScrollSpeed: speed })
 }
+
+function setTheme(theme: ReaderSettings['theme']) {
+  // Selecting a swatch means "use this now" — leave system/schedule so it isn't
+  // stuck on dark while only the daytime fallback updates.
+  emit('update', { theme, appearanceMode: 'manual' })
+}
 </script>
 
 <template>
@@ -195,7 +201,7 @@ function setAutoScrollPreset(speed: number) {
             type="button"
             class="seg-btn"
             :class="{ active: settings.theme === 'light' }"
-            @click="emit('update', { theme: 'light' })"
+            @click="setTheme('light')"
           >
             浅色
           </button>
@@ -204,7 +210,7 @@ function setAutoScrollPreset(speed: number) {
             class="seg-btn"
             :class="{ active: settings.theme === 'dark' }"
             :disabled="settings.appearanceMode === 'system' || settings.appearanceMode === 'schedule'"
-            @click="emit('update', { theme: 'dark' })"
+            @click="setTheme('dark')"
           >
             深色
           </button>
@@ -212,7 +218,7 @@ function setAutoScrollPreset(speed: number) {
             type="button"
             class="seg-btn"
             :class="{ active: settings.theme === 'sepia' }"
-            @click="emit('update', { theme: 'sepia' })"
+            @click="setTheme('sepia')"
           >
             羊皮纸
           </button>
@@ -220,7 +226,7 @@ function setAutoScrollPreset(speed: number) {
             type="button"
             class="seg-btn"
             :class="{ active: settings.theme === 'green' }"
-            @click="emit('update', { theme: 'green' })"
+            @click="setTheme('green')"
           >
             护眼绿
           </button>

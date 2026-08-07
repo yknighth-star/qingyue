@@ -1367,36 +1367,32 @@ html body h6 {
       }
       this.pinThemeStyleLast(doc, styleEl)
 
-      // Paint surfaces with theme bg (not transparent): nested publisher fills can't peek through.
-      // Exclude media + our marks / epub.js highlights.
-      // Do NOT set height/min-height on html/body — that desyncs epub.js column pagination / dual spread.
+      // Paint theme fills with background-color only on descendants.
+      // Never use `background` shorthand / blanket background-image:none — that wipes
+      // EPUB illustrations delivered as CSS background-image (common on CN Kindle books).
+      // Do NOT set height/min-height on html/body — desyncs epub.js column pagination.
       const scheme = theme === 'dark' ? 'dark' : 'light'
+      const mediaSkip =
+        ':not(img):not(svg):not(video):not(canvas):not(picture):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"])'
       styleEl.textContent = `
 html {
   color-scheme: ${scheme} !important;
-  background: ${bg} !important;
   background-color: ${bg} !important;
+  background-image: none !important;
   color: ${fg} !important;
 }
 html body,
 html body[class],
 html body[style] {
-  background: ${bg} !important;
   background-color: ${bg} !important;
   background-image: none !important;
   color: ${fg} !important;
 }
-html body *:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]),
-html body *[class]:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]),
-html body *[style]:not(img):not(svg):not(video):not(canvas):not(mark):not(.search-hit):not([class*="epubjs-hl"]):not([class*="epubjs-hl-"]) {
-  background: ${bg} !important;
+html body *${mediaSkip},
+html body *[class]${mediaSkip},
+html body *[style]${mediaSkip} {
   background-color: ${bg} !important;
-  background-image: none !important;
   color: ${fg} !important;
-}
-html body *::before,
-html body *::after {
-  background-image: none !important;
 }
 html body a,
 html body a[class],
@@ -1408,25 +1404,47 @@ html body mark.search-hit,
 html body [class*="epubjs-hl"] {
   color: inherit !important;
 }
+html body img,
+html body svg,
+html body video,
+html body canvas,
+html body picture {
+  background-color: transparent !important;
+  background-image: unset !important;
+  color: inherit !important;
+}
 `.trim()
 
-      root.style.setProperty('background', bg, 'important')
       root.style.setProperty('background-color', bg, 'important')
+      root.style.setProperty('background-image', 'none', 'important')
       root.style.setProperty('color', fg, 'important')
       const body = doc.body
       if (body) {
-        body.style.setProperty('background', bg, 'important')
         body.style.setProperty('background-color', bg, 'important')
+        body.style.setProperty('background-image', 'none', 'important')
         body.style.setProperty('color', fg, 'important')
         Array.from(body.children).forEach((node) => {
           if (!(node instanceof HTMLElement)) return
           const tag = node.tagName.toLowerCase()
           if (tag === 'script' || tag === 'style' || tag === 'link') return
-          if (node.id === 'qingyue-theme') return
-          node.style.setProperty('background', bg, 'important')
+          if (node.id === 'qingyue-theme' || node.id === 'qingyue-typography') return
+          if (tag === 'img' || tag === 'svg' || tag === 'video' || tag === 'canvas' || tag === 'picture') {
+            return
+          }
+          // Keep CSS/background illustrations on chapter root children.
+          const inlineBg = node.style.backgroundImage
+          const hasBgImage =
+            (inlineBg && inlineBg !== 'none') ||
+            /url\(/i.test(node.getAttribute('style') || '')
           node.style.setProperty('background-color', bg, 'important')
-          node.style.setProperty('background-image', 'none', 'important')
           node.style.setProperty('color', fg, 'important')
+          if (!hasBgImage) {
+            // Only clear solid washes; do not touch url(...) backgrounds.
+            const computed = doc.defaultView?.getComputedStyle(node).backgroundImage
+            if (!computed || computed === 'none') {
+              node.style.setProperty('background-image', 'none', 'important')
+            }
+          }
         })
       }
       root.dataset.qyTheme = fp
@@ -1499,12 +1517,11 @@ html body [class*="epubjs-hl"] {
         try {
           this.pinThemeStyleLast(doc, styleEl)
           const root = doc.documentElement
-          root.style.setProperty('background', bg, 'important')
           root.style.setProperty('background-color', bg, 'important')
+          root.style.setProperty('background-image', 'none', 'important')
           root.style.setProperty('color', fg, 'important')
           const body = doc.body
           if (body) {
-            body.style.setProperty('background', bg, 'important')
             body.style.setProperty('background-color', bg, 'important')
             body.style.setProperty('background-image', 'none', 'important')
             body.style.setProperty('color', fg, 'important')
@@ -1574,16 +1591,16 @@ html body [class*="epubjs-hl"] {
         'overflow-x': 'hidden !important',
         'max-width': '100% !important',
         'box-sizing': 'border-box !important',
-        background: `${bg} !important`,
         'background-color': `${bg} !important`,
+        'background-image': 'none !important',
         color: `${fg} !important`,
       },
       '*, *::before, *::after': {
         'box-sizing': 'border-box !important',
       },
       body: {
-        background: `${bg} !important`,
         'background-color': `${bg} !important`,
+        'background-image': 'none !important',
         color: `${fg} !important`,
         ...typeface,
         margin: '0 !important',
@@ -1610,14 +1627,14 @@ html body [class*="epubjs-hl"] {
         {
           ...typeface,
           color: `${fg} !important`,
-          // Solid theme fill — transparent lets publisher dark/green washes show through.
-          background: `${bg} !important`,
+          // background-color only — `background` shorthand clears CSS image illustrations.
           'background-color': `${bg} !important`,
         },
-      'img, svg, video, canvas': {
+      'img, svg, video, canvas, picture': {
         'max-width': '100% !important',
         height: 'auto !important',
         'object-fit': 'contain !important',
+        'background-color': 'transparent !important',
       },
       table: {
         'max-width': '100% !important',
