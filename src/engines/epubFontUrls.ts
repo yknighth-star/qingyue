@@ -18,12 +18,23 @@ type ResourcesLike = {
   replacementUrls?: Array<string | null | undefined>
 }
 
+/** epubjs Book typings omit several runtime fields we need. */
+type EpubBookRuntime = Book & {
+  resources?: ResourcesLike
+  archive?: ZipArchive
+  resolve?: (path: string, absolute?: boolean) => string
+}
+
+function asBook(book: Book): EpubBookRuntime {
+  return book as EpubBookRuntime
+}
+
 /**
  * Before first display: rewrite font urls inside epub.js-generated CSS blobs.
  * Relative urls inside blob: CSS resolve against the blob id and Chrome blocks them.
  */
 export async function remapBookCssFonts(book: Book, cache: Map<string, string>): Promise<void> {
-  const resources = book.resources as unknown as ResourcesLike | undefined
+  const resources = asBook(book).resources
   if (!resources?.urls?.length || !resources.replacementUrls?.length) return
 
   for (let i = 0; i < resources.urls.length; i++) {
@@ -163,7 +174,7 @@ async function resolveFontBlob(
   const cached = cache.get(cleaned) || cache.get(cleaned.split(/[/\\]/).pop()!.toLowerCase())
   if (cached) return cached
 
-  const archive = book.archive as unknown as ZipArchive | null | undefined
+  const archive = asBook(book).archive
   if (!archive?.zip) return null
 
   const candidates = buildZipCandidates(cleaned, baseHref, book)
@@ -206,7 +217,7 @@ function buildZipCandidates(ref: string, baseHref: string, book: Book): string[]
   push(ref)
   push(ref.replace(/^\.\//, ''))
   try {
-    push(book.resolve(ref, false))
+    push(asBook(book).resolve?.(ref, false))
   } catch {
     /* */
   }
