@@ -1625,6 +1625,16 @@ html body th[data-qy-on-dark='1'] {
   -webkit-text-fill-color: ${lightOnDark} !important;
   opacity: 1 !important;
 }
+/* Overlay titles: no cream/white full-bleed plate behind black capsules. */
+html body [data-qy-clear-plate='1'],
+html body [data-qy-clear-plate='1'][class],
+html body [data-qy-clear-plate='1'][style] {
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  width: auto !important;
+  max-width: 100% !important;
+}
 /* Only mark SVG nodes explicitly — never fill:* under HTML parents (bleaches diagram labels). */
 html body svg text[data-qy-on-dark='1'],
 html body svg text[data-qy-on-dark='1'] tspan,
@@ -1741,6 +1751,30 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       } else delete el.dataset.qyOnDark
     }
 
+    /** Kill cream/white full-bleed plates behind black title pills (titleReset width:100% + light wash). */
+    const clearLightPlate = (el: HTMLElement) => {
+      el.style.setProperty('background-color', 'transparent', 'important')
+      el.style.setProperty('background-image', 'none', 'important')
+      el.style.setProperty('box-shadow', 'none', 'important')
+      el.style.setProperty('width', 'auto', 'important')
+      el.style.setProperty('max-width', '100%', 'important')
+      el.dataset.qyClearPlate = '1'
+    }
+
+    const hostsFigureOrDarkPill = (el: HTMLElement, kids: HTMLElement[]) => {
+      if (isFigureTitleChrome(el) || isFigureTitleLike(el)) return true
+      if (el.querySelector(':scope > img, :scope > svg, :scope > picture, :scope > object')) return true
+      for (const k of kids) {
+        try {
+          const s = resolveSurfaceBackgroundCss(k, win.getComputedStyle(k), win)
+          if (isDarkSurfaceCss(s)) return true
+        } catch {
+          /* */
+        }
+      }
+      return false
+    }
+
     const walk = (el: HTMLElement, depth: number, inheritedFg: string, underDark: boolean) => {
       if (depth > 14) return
       const tag = el.tagName.toLowerCase()
@@ -1776,8 +1810,10 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
           nextFg = lightOnDark
           nextDark = true
           applyText(el, lightOnDark, true)
-        } else if (titleLike) {
+          // url bar is the dark plate — keep it; don't add an extra light wash plate.
+        } else if (titleLike || short) {
           applyText(el, inheritedFg, false)
+          clearLightPlate(el)
         } else {
           applyText(el, inheritedFg, false)
         }
@@ -1796,6 +1832,12 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
           nextDark = true
           applyText(el, light, true)
           // Keep publisher dark fill (don't wash to page bg).
+        } else if (hostsFigureOrDarkPill(el, kids)) {
+          // Figure stacks: no cream full-width bar behind the black capsule.
+          clearLightPlate(el)
+          nextFg = fg
+          nextDark = false
+          applyText(el, fg, false)
         } else {
           el.style.setProperty('background-color', bg, 'important')
           nextFg = fg
@@ -1808,24 +1850,28 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         nextFg = lightOnDark
       } else if (
         // Transparent title over sibling absolute black pill / SVG capsule.
-        // Limit to short title-like strings so body copy is not inverted.
         elementOverlapsDarkBackdrop(el, win) &&
         ((el.textContent || '').replace(/\s+/g, '').trim().length <= 24 || titleLike)
       ) {
         nextFg = lightOnDark
         nextDark = true
         applyText(el, lightOnDark, true)
+        clearLightPlate(el)
       } else if (titleLike) {
         const inline = el.getAttribute('style') || ''
         const looksBlack =
           /background(-color)?\s*:\s*(#0{3,8}|black|rgb\(\s*0\s*,\s*0\s*,\s*0)/i.test(inline) ||
           /^(#0{3,8}|black)$/i.test(el.getAttribute('bgcolor') || '')
-        // Caption near a figure often overlays a black title bar — theme-dark text covers it.
         const nearFigure = !!el.parentElement?.querySelector('img, svg, picture, object')
-        if (looksBlack || nearFigure) {
+        if (looksBlack) {
           nextFg = lightOnDark
           nextDark = true
           applyText(el, lightOnDark, true)
+        } else if (nearFigure) {
+          nextFg = lightOnDark
+          nextDark = true
+          applyText(el, lightOnDark, true)
+          clearLightPlate(el)
         } else {
           applyText(el, inheritedFg, underDark)
         }

@@ -594,6 +594,20 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
     el.style.setProperty('-webkit-text-fill-color', WHITE, 'important')
     el.style.setProperty('opacity', '1', 'important')
     el.dataset.qyOnDark = '1'
+    // Overlay on dark img/svg/sibling — don't leave a light full-bleed plate.
+    try {
+      const cs = win!.getComputedStyle(el)
+      const surface = resolveSurfaceBackgroundCss(el, cs, win)
+      if (!isDarkSurfaceCss(surface)) {
+        el.style.setProperty('background-color', 'transparent', 'important')
+        el.style.setProperty('background-image', 'none', 'important')
+        el.style.setProperty('box-shadow', 'none', 'important')
+        el.style.setProperty('width', 'auto', 'important')
+        el.dataset.qyClearPlate = '1'
+      }
+    } catch {
+      /* */
+    }
     fixed++
   }
 

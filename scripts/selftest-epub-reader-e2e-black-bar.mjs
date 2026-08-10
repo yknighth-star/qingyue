@@ -160,7 +160,9 @@ try {
     const svgTitle = document.getElementById('svg-title')
     const label = document.getElementById('svg-label')
     const glyph = document.getElementById('glyph')
+    const wrap = document.getElementById('abs-wrap')
     const cs = (el) => (el ? getComputedStyle(el).color : null)
+    const bg = (el) => (el ? getComputedStyle(el).backgroundColor : null)
     const fill = (el) => {
       if (!el) return null
       return el.style.fill || getComputedStyle(el).fill
@@ -168,8 +170,11 @@ try {
     return {
       solid: cs(solid),
       abs: cs(abs),
+      absBg: bg(abs),
+      wrapBg: bg(wrap),
       solidOnDark: solid?.dataset?.qyOnDark || null,
       absOnDark: abs?.dataset?.qyOnDark || null,
+      absClear: abs?.dataset?.qyClearPlate || null,
       svgTitle: fill(svgTitle),
       svgLabel: fill(label),
       glyph: fill(glyph),
@@ -182,10 +187,16 @@ try {
 
   const isWhite = (c) => /255,\s*255,\s*255|#fff/i.test(c || '')
   const isDark = (c) => /59,\s*47,\s*47|3b2f2f|0,\s*0,\s*0|#000/i.test(c || '')
+  const isTransparent = (c) =>
+    !c || /transparent|rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/i.test(c)
 
   assert(colors.themeStyle, 'qingyue-theme injected')
   assert(isWhite(colors.solid), `solid black bar title is white (got ${colors.solid})`)
   assert(isWhite(colors.abs), `absolute overlay title is white (got ${colors.abs})`)
+  assert(
+    isTransparent(colors.absBg),
+    `overlay title has no light plate (bg=${colors.absBg})`,
+  )
   assert(isWhite(colors.svgTitle), `svg text on black is white (got ${colors.svgTitle})`)
   assert(isWhite(colors.glyph) || isWhite(String(colors.glyph)), `svg #000 path glyph lightened (got ${colors.glyph})`)
   assert(isDark(colors.svgLabel) || /59|3b2f2f|0,\s*0,\s*0/i.test(colors.svgLabel || ''), `label on white stays dark (got ${colors.svgLabel})`)
