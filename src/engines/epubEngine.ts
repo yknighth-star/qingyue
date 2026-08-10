@@ -11,6 +11,9 @@ import {
   isDarkSurfaceCss,
   isFigureTitleChrome,
   isFigureTitleLike,
+  isHtmlElement,
+  isSvgGeometryElement,
+  isSvgSvgElement,
   isTransparentCssColor,
   resolveSurfaceBackgroundCss,
   resolveSvgTextFill,
@@ -1393,25 +1396,24 @@ html body h6 {
     if (this.themeDocGuards.has(doc)) return
     const scheduleReapply = (force: boolean) => {
       if (this.themeApplyDepth > 0 || !this.settings) return
-      if (performance.now() < this.themeQuietUntil) return
       if (!doc.defaultView || doc.defaultView.closed) return
       const prev = this.themeGuardTimers.get(doc)
       if (prev) window.clearTimeout(prev)
       const settings = this.settings
+      // If we're in the quiet window, defer until it ends — never drop the event.
+      const delay = Math.max(120, Math.ceil(this.themeQuietUntil - performance.now()) + 30)
       const timer = window.setTimeout(() => {
         this.themeGuardTimers.delete(doc)
         if (!this.settings || this.settings !== settings) return
         if (!doc.defaultView || doc.defaultView.closed) return
-        if (this.themeApplyDepth > 0 || performance.now() < this.themeQuietUntil) return
-        // Soft by default: full wash only when our theme sheet lost cascade order.
+        if (this.themeApplyDepth > 0) return
         this.applyThemeColorsToDocument(doc, settings, force)
-        // Theme pin-last can sit above media-fit — re-apply pixel page-box caps.
         this.containOverflowMedia(doc)
-      }, 120)
+      }, delay)
       this.themeGuardTimers.set(doc, timer)
     }
     const observer = new MutationObserver((mutations) => {
-      if (this.themeApplyDepth > 0 || performance.now() < this.themeQuietUntil) return
+      if (this.themeApplyDepth > 0) return
       for (const m of mutations) {
         if (m.type === 'attributes') {
           const t = m.target
@@ -1423,7 +1425,7 @@ html body h6 {
         }
         if (m.type !== 'childList') continue
         for (const n of m.addedNodes) {
-          if (!(n instanceof HTMLElement)) continue
+          if (!isHtmlElement(n)) continue
           if (n.id === 'qingyue-theme' || n.id === 'qingyue-typography' || n.id === 'qingyue-media-fit') continue
           const tag = n.tagName
           if (
@@ -1435,6 +1437,11 @@ html body h6 {
           }
           if (n.querySelector?.('style, link[rel="stylesheet"]')) {
             scheduleReapply(true)
+            return
+          }
+          // Chapter body content swapped in after first theme paint.
+          if (tag === 'P' || tag === 'DIV' || tag === 'SECTION' || tag === 'SVG' || tag === 'IMG') {
+            scheduleReapply(false)
             return
           }
         }
@@ -1595,7 +1602,25 @@ html body [data-qy-on-dark='1'] a,
 html body [data-qy-on-dark='1'] em,
 html body [data-qy-on-dark='1'] strong,
 html body [data-qy-on-dark='1'] b,
-html body [data-qy-on-dark='1'] i {
+html body [data-qy-on-dark='1'] i,
+html body p[data-qy-on-dark='1'],
+html body p[class][data-qy-on-dark='1'],
+html body p[style][data-qy-on-dark='1'],
+html body div[data-qy-on-dark='1'],
+html body div[class][data-qy-on-dark='1'],
+html body div[style][data-qy-on-dark='1'],
+html body span[data-qy-on-dark='1'],
+html body span[class][data-qy-on-dark='1'],
+html body h1[data-qy-on-dark='1'],
+html body h2[data-qy-on-dark='1'],
+html body h3[data-qy-on-dark='1'],
+html body h4[data-qy-on-dark='1'],
+html body h5[data-qy-on-dark='1'],
+html body h6[data-qy-on-dark='1'],
+html body figcaption[data-qy-on-dark='1'],
+html body li[data-qy-on-dark='1'],
+html body td[data-qy-on-dark='1'],
+html body th[data-qy-on-dark='1'] {
   color: ${lightOnDark} !important;
   -webkit-text-fill-color: ${lightOnDark} !important;
   opacity: 1 !important;
@@ -1664,7 +1689,27 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     const body = doc.body
     if (!win || !body) return
 
+    try {
+      body.dataset.qyWashAt = String(Date.now())
+      this.paintPublisherWashesInner(doc, bg, fg, win, body)
+      body.dataset.qyWashOk = '1'
+      delete body.dataset.qyWashErr
+    } catch (err) {
+      body.dataset.qyWashOk = '0'
+      body.dataset.qyWashErr = err instanceof Error ? err.message : String(err)
+      console.error('[qingyue] paintPublisherWashes failed', err)
+    }
+  }
+
+  private paintPublisherWashesInner(
+    doc: Document,
+    bg: string,
+    fg: string,
+    win: Window,
+    body: HTMLElement,
+  ) {
     const lightOnDark = LIGHT_ON_DARK_FG
+    let marked = 0
 
     const isMedia = (tag: string) =>
       tag === 'img' ||
@@ -1690,8 +1735,10 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       el.style.setProperty('color', color, 'important')
       el.style.setProperty('-webkit-text-fill-color', color, 'important')
       el.style.setProperty('opacity', '1', 'important')
-      if (onDark) el.dataset.qyOnDark = '1'
-      else delete el.dataset.qyOnDark
+      if (onDark) {
+        el.dataset.qyOnDark = '1'
+        marked++
+      } else delete el.dataset.qyOnDark
     }
 
     const walk = (el: HTMLElement, depth: number, inheritedFg: string, underDark: boolean) => {
@@ -1707,7 +1754,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         return
       }
 
-      const kids = Array.from(el.children).filter((n) => n instanceof HTMLElement) as HTMLElement[]
+      const kids = Array.from(el.children).filter((n) => isHtmlElement(n)) as HTMLElement[]
       const urlIllust = hasUrlIllustration(el, cs)
       const mediaOnly =
         kids.length > 0 &&
@@ -1790,11 +1837,32 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     }
 
     for (const child of Array.from(body.children)) {
-      if (child instanceof HTMLElement) walk(child, 0, fg, false)
+      if (isHtmlElement(child)) walk(child, 0, fg, false)
     }
 
     // Hard pass: short labels on dark img/svg/url pills (no class heuristics).
-    forceShortLabelsOnDarkBackdrop(doc, fg)
+    marked += forceShortLabelsOnDarkBackdrop(doc, fg)
+
+    // Last-resort scan: any element with a dark computed background gets white text.
+    // Catches cases the tree walk missed (epub.js reparenting / late class styles).
+    // CRITICAL: must use isHtmlElement — parent `instanceof HTMLElement` is false in iframes.
+    doc.querySelectorAll('p, div, span, h1, h2, h3, h4, h5, h6, figcaption, caption, center, li, td, th').forEach(
+      (node) => {
+        if (!isHtmlElement(node)) return
+        if (node.dataset.qyOnDark === '1') return
+        let cs: CSSStyleDeclaration
+        try {
+          cs = win.getComputedStyle(node)
+        } catch {
+          return
+        }
+        const surface = resolveSurfaceBackgroundCss(node, cs, win)
+        if (!isDarkSurfaceCss(surface)) return
+        applyText(node, lightOnDark, true)
+      },
+    )
+
+    body.dataset.qyWashMarked = String(marked)
 
     // SVG diagrams: title text uses fill/currentColor, not CSS color. HTML wash skips <svg>.
     this.paintSvgTextContrast(doc, lightOnDark, fg)
@@ -1819,7 +1887,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     const lightFg = light || LIGHT_ON_DARK_FG
 
     doc.querySelectorAll('svg').forEach((svg) => {
-      if (!(svg instanceof SVGSVGElement)) return
+      if (!isSvgSvgElement(svg)) return
 
       const titleBands = collectSvgTitleBands(svg, currentColor)
 
@@ -1834,32 +1902,32 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       }
 
       svg.querySelectorAll('text').forEach((node) => {
-        if (!(node instanceof SVGTextElement)) return
+        if (node.tagName.toLowerCase() !== 'text') return
+        const textEl = node as unknown as SVGTextElement
         const fill = resolveSvgTextFill({
-          textEl: node,
+          textEl,
           light: lightFg,
           dark,
           currentColor,
           titleBands,
         })
-        node.style.setProperty('fill', fill, 'important')
-        node.style.setProperty('color', fill, 'important')
-        if (fill === lightFg) node.setAttribute('data-qy-on-dark', '1')
-        else node.removeAttribute('data-qy-on-dark')
-        node.querySelectorAll('tspan').forEach((t) => {
-          if (t instanceof SVGTSpanElement) {
-            t.style.setProperty('fill', fill, 'important')
-            t.style.setProperty('color', fill, 'important')
-            if (fill === lightFg) t.setAttribute('data-qy-on-dark', '1')
-            else t.removeAttribute('data-qy-on-dark')
-          }
+        textEl.style.setProperty('fill', fill, 'important')
+        textEl.style.setProperty('color', fill, 'important')
+        if (fill === lightFg) textEl.setAttribute('data-qy-on-dark', '1')
+        else textEl.removeAttribute('data-qy-on-dark')
+        textEl.querySelectorAll('tspan').forEach((t) => {
+          const tspan = t as SVGTSpanElement
+          tspan.style.setProperty('fill', fill, 'important')
+          tspan.style.setProperty('color', fill, 'important')
+          if (fill === lightFg) tspan.setAttribute('data-qy-on-dark', '1')
+          else tspan.removeAttribute('data-qy-on-dark')
         })
       })
 
       // Path/polygon "glyphs" on dark bars (Illustrator / Kindle CN exports).
       const glyphPaths: SVGGeometryElement[] = []
       svg.querySelectorAll('path, polygon').forEach((node) => {
-        if (!(node instanceof SVGGeometryElement)) return
+        if (!isSvgGeometryElement(node)) return
         const fill = shouldLightenSvgGlyphShape({
           shape: node,
           light: lightFg,
@@ -2200,14 +2268,14 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       'h1,h2,h3,h4,h5,h6,p.title,p.titlepage,p.chapter,p.chapter-title,p.ctitle,p.center,.title,.chapter-title,.chapterTitle,[class*="title"],[class*="Title"],[class*="chapter-title"],[align="center"],[align="right"],[align="CENTER"],[align="RIGHT"]',
     )
     titled.forEach((node) => {
-      if (node instanceof HTMLElement) applyCenter(node)
+      if (isHtmlElement(node)) applyCenter(node)
     })
 
     // Heuristic: first meaningful block that looks like a short heading (e.g. 「把你的情绪说出来」)
     const body = doc.body
     if (!body) return
     for (const child of Array.from(body.children)) {
-      if (!(child instanceof HTMLElement)) continue
+      if (!isHtmlElement(child)) continue
       const tag = child.tagName.toLowerCase()
       if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'img') continue
       const text = (child.textContent || '').replace(/\s+/g, '').trim()

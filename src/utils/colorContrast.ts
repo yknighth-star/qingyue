@@ -1,3 +1,18 @@
+/** Cross-iframe-safe element checks (parent `instanceof` is false for iframe nodes). */
+export function isHtmlElement(node: Node | null | undefined): node is HTMLElement {
+  return !!node && node.nodeType === 1 && typeof (node as HTMLElement).style !== 'undefined'
+}
+
+export function isSvgSvgElement(node: Node | null | undefined): node is SVGSVGElement {
+  return isHtmlElement(node) && (node as Element).tagName.toLowerCase() === 'svg'
+}
+
+export function isSvgGeometryElement(node: Node | null | undefined): node is SVGGeometryElement {
+  if (!node || node.nodeType !== 1) return false
+  const tag = (node as Element).tagName.toLowerCase()
+  return tag === 'path' || tag === 'rect' || tag === 'circle' || tag === 'ellipse' || tag === 'polygon' || tag === 'polyline' || tag === 'line'
+}
+
 /** Parse CSS color to sRGB 0–255. Supports #rgb/#rrggbb/#rrggbbaa and rgb(a)(). */
 export function parseCssColor(
   input: string,
@@ -121,7 +136,7 @@ export function collectSvgTitleBands(
 
   const shapes = svg.querySelectorAll('rect, path, ellipse, polygon')
   for (const shape of shapes) {
-    if (!(shape instanceof SVGGeometryElement)) continue
+    if (!isSvgGeometryElement(shape)) continue
     const paint = shapeFillPaint(shape)
     if (!paint || !isDarkPaint(paint, currentColor)) continue
     try {
@@ -177,12 +192,12 @@ const TITLE_CLASS_RE =
 export function isFigureTitleLike(el: Element): boolean {
   const tag = el.tagName.toLowerCase()
   if (tag === 'figcaption' || tag === 'caption' || tag === 'cite') return true
-  const cls = (el instanceof HTMLElement ? el.className : '') || ''
+  const cls = isHtmlElement(el) ? el.className || '' : ''
   if (typeof cls === 'string' && TITLE_CLASS_RE.test(cls)) return true
   const id = el.id || ''
   if (TITLE_CLASS_RE.test(id)) return true
   // Short centered heading-like blocks (e.g. 「赈灾物品」)
-  if (el instanceof HTMLElement) {
+  if (isHtmlElement(el)) {
     const align = (el.getAttribute('align') || el.style.textAlign || '').toLowerCase()
     const text = (el.textContent || '').replace(/\s+/g, '').trim()
     if (text.length > 0 && text.length <= 24 && /center/i.test(align)) return true
@@ -331,7 +346,7 @@ export function svgPointOnDarkShape(
   const shapes = svg.querySelectorAll('rect, path, circle, ellipse, polygon, polyline')
   for (const shape of shapes) {
     if (exclude && shape === exclude) continue
-    if (!(shape instanceof SVGGeometryElement)) continue
+    if (!isSvgGeometryElement(shape)) continue
     const paint = shapeFillPaint(shape)
     if (!paint) continue
     if (!isDarkPaint(paint, currentColor)) continue
@@ -392,9 +407,10 @@ export function resolveSvgTextFill(opts: {
 }
 
 /**
- * Illustrator/CN EPUB diagrams often draw titles as <path> glyphs with
- * fill=currentColor / theme fg — not <text>. Lighten only theme-driven dark
- * fills that sit on a *different* dark backdrop (leave the black bar itself).
+ * Illustrator/CN EPUB diagrams often draw titles as <path> glyphs — not <text>.
+ * Any dark fill on a *small* shape sitting in a title band / on a larger dark
+ * backdrop must go white. Do NOT require theme/currentColor: publisher often
+ * uses fill="#000" / "#222" for glyphs (neutral grey AA in screenshots).
  */
 export function shouldLightenSvgGlyphShape(opts: {
   shape: SVGGeometryElement
@@ -404,7 +420,7 @@ export function shouldLightenSvgGlyphShape(opts: {
   themeFg: string
   titleBands?: SvgBand[]
 }): string | null {
-  const { shape, light, currentColor, themeFg, titleBands } = opts
+  const { shape, light, currentColor, titleBands } = opts
   const svg = shape.ownerSVGElement
   if (!svg) return null
 
@@ -417,15 +433,8 @@ export function shouldLightenSvgGlyphShape(opts: {
   }
   const raw = parsePaintColor(fillAttr) || parsePaintColor(fillCs || undefined)
   if (!raw || raw === 'none') return null
-
-  // Black decorative bars use solid #000 — do not invert them.
-  // Glyphs use currentColor or a fill ≈ theme foreground.
-  const themeDriven =
-    raw === 'currentColor' ||
-    colorsClose(raw === 'currentColor' ? currentColor : raw, themeFg) ||
-    colorsClose(raw === 'currentColor' ? currentColor : raw, currentColor)
-  if (!themeDriven) return null
-  if (!isDarkPaint(raw, currentColor) && !isDarkDecorativeBackground(currentColor)) return null
+  // Light/white fills are already fine (end-caps, white circles).
+  if (!isDarkPaint(raw, currentColor)) return null
 
   let cx = 0
   let cy = 0
@@ -440,14 +449,26 @@ export function shouldLightenSvgGlyphShape(opts: {
   } catch {
     return null
   }
-  // Skip huge backdrop shapes (the black capsule itself if somehow theme-colored).
+
+  // Skip huge backdrop shapes (the black capsule itself).
+  let sw = 0
+  let sh = 0
   try {
     const vb = svg.viewBox?.baseVal
-    const sw = vb && vb.width ? vb.width : svg.getBBox().width
-    if (sw > 0 && bw * bh > sw * sw * 0.12) return null
+    if (vb && vb.width > 0) {
+      sw = vb.width
+      sh = vb.height
+    } else {
+      const sb = svg.getBBox()
+      sw = sb.width
+      sh = sb.height
+    }
   } catch {
     /* */
   }
+  if (sw > 0 && bw * bh > sw * sh * 0.08) return null
+  // Glyphs are small relative to the title bar; skip mid-size decorations.
+  if (sw > 0 && bw > sw * 0.5 && bh > sh * 0.08) return null
 
   if (titleBands?.length && pointInSvgBands(cx, cy, titleBands)) return light
   if (!svgPointOnDarkShape(svg, cx, cy, currentColor, shape)) return null
@@ -498,22 +519,23 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
     if (!parent || parent === el.ownerDocument.body) break
 
     for (const sib of Array.from(parent.children)) {
-      if (!(sib instanceof HTMLElement) || sib === node) continue
+      if (!isHtmlElement(sib) || sib === node) continue
       const tag = sib.tagName.toLowerCase()
       if (tag === 'script' || tag === 'style' || tag === 'br') continue
 
-      if (tag === 'img' && sib instanceof HTMLImageElement) {
-        const sr = sib.getBoundingClientRect()
+      if (tag === 'img' && (sib as HTMLImageElement).naturalWidth !== undefined && sib.tagName.toLowerCase() === 'img') {
+        const img = sib as HTMLImageElement
+        const sr = img.getBoundingClientRect()
         if (cx >= sr.left && cx <= sr.right && cy >= sr.top && cy <= sr.bottom) {
-          if (imgDarkAt(sib)) return true
-        } else if (rectsOverlap(rect, sr, 0.35) && imgDarkAt(sib)) {
+          if (imgDarkAt(img)) return true
+        } else if (rectsOverlap(rect, sr, 0.35) && imgDarkAt(img)) {
           return true
         }
         continue
       }
 
       // SVG sibling: hit-test dark shapes in svg user space via screen bbox of svg.
-      if (tag === 'svg' && sib instanceof SVGSVGElement) {
+      if (tag === 'svg' && isSvgSvgElement(sib)) {
         const sr = sib.getBoundingClientRect()
         if (!rectsOverlap(rect, sr, 0.15)) continue
         try {
@@ -591,7 +613,7 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
   )
 
   candidates.forEach((node) => {
-    if (!(node instanceof HTMLElement)) return
+    if (!isHtmlElement(node)) return
     if (node.closest('svg')) return
     const text = ownShortText(node)
     if (!text || text.length > 24) return
@@ -643,18 +665,19 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
         el = el.parentElement
         continue
       }
-      if (el instanceof HTMLImageElement) {
+      if (el.tagName.toLowerCase() === 'img') {
         try {
-          const r = el.getBoundingClientRect()
-          if (r.width >= 1 && el.naturalWidth) {
+          const img = el as HTMLImageElement
+          const r = img.getBoundingClientRect()
+          if (r.width >= 1 && img.naturalWidth) {
             const canvas = doc.createElement('canvas')
             canvas.width = 1
             canvas.height = 1
             const ctx = canvas.getContext('2d')
             if (ctx) {
-              const nx = ((cx - r.left) / r.width) * el.naturalWidth
-              const ny = ((cy - r.top) / r.height) * el.naturalHeight
-              ctx.drawImage(el, nx, ny, 1, 1, 0, 0, 1, 1)
+              const nx = ((cx - r.left) / r.width) * img.naturalWidth
+              const ny = ((cy - r.top) / r.height) * img.naturalHeight
+              ctx.drawImage(img, nx, ny, 1, 1, 0, 0, 1, 1)
               const d = ctx.getImageData(0, 0, 1, 1).data
               if (relativeLuminance(d[0], d[1], d[2]) < 0.42) {
                 force(node)
@@ -670,8 +693,8 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
           return
         }
       }
-      if (el instanceof SVGSVGElement || (el instanceof SVGElement && el.ownerSVGElement)) {
-        const svg = el instanceof SVGSVGElement ? el : el.ownerSVGElement!
+      if (isSvgSvgElement(el) || (el.namespaceURI === 'http://www.w3.org/2000/svg' && (el as SVGElement).ownerSVGElement)) {
+        const svg = isSvgSvgElement(el) ? el : (el as SVGElement).ownerSVGElement!
         const sr = svg.getBoundingClientRect()
         const vb = svg.viewBox?.baseVal
         let ux = cx - sr.left
@@ -686,7 +709,7 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
           return
         }
       }
-      if (el instanceof HTMLElement) {
+      if (isHtmlElement(el)) {
         try {
           const s = resolveSurfaceBackgroundCss(el, win.getComputedStyle(el), win)
           if (isDarkSurfaceCss(s)) {
