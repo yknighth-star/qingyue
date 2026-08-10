@@ -1,23 +1,17 @@
 /**
- * EPUB paginated media fit — keep figures inside a single CSS-column page box.
- * Scroll mode only constrains width (natural height OK).
+ * EPUB paginated media fit — keep figures inside ONE visible page column.
  *
- * Critical: never use max-width:100% in paginated mode — inside epub.js multicol
- * that % resolves against the *expanded* column strip, so images spill into the
- * next page. Always cap with pixel page-box sizes.
+ * Root cause of mobile width spill:
+ * epub.js expand() stretches the chapter iframe to the full multicol strip
+ * (thousands of px). Inside that iframe, `100vw` / `100%` resolve to the STRIP,
+ * not the phone screen — so CSS caps based on vw/% are useless.
  *
- * Never strip HTML width/height attributes. Never set width/height:auto !important
- * alone — that collapses 1×1 bitmaps that rely on HTML presentational size
- * (see scripts/selftest-epub-images.mjs).
+ * Fix: always inject pixel page-box caps via #qingyue-media-fit + inline styles,
+ * measured from the HOST stage (.epub-container), never from iframe vw.
  */
 
-/** epub.js contents.columns() sets padding-top/bottom 20px each. */
 export const EPUBJS_COLUMN_PADDING_Y = 40
-
-/** Matches EpubEngine dual-spread gap when dual is on. */
 export const EPUB_DUAL_COLUMN_GAP = 40
-
-const PAGE_BOX_SAFETY = 8
 
 export type MediaFitMode = 'paginated' | 'scroll'
 
@@ -35,23 +29,19 @@ export function resolveColumnPageBox(opts: {
   const gap = opts.gap ?? EPUB_DUAL_COLUMN_GAP
   const stageW = Math.max(1, Math.round(opts.stageW))
   const stageH = Math.max(1, Math.round(opts.stageH))
-  const maxH = Math.max(48, stageH - EPUBJS_COLUMN_PADDING_Y - PAGE_BOX_SAFETY)
+  // Tight phone margins — leave headroom for chrome / captions.
+  const maxH = Math.max(96, Math.floor(stageH * (stageH < 700 ? 0.8 : 0.88)))
   if (!opts.dual) {
-    return { maxW: Math.max(64, Math.floor(stageW * 0.96)), maxH }
+    return { maxW: Math.max(64, Math.floor(stageW * 0.94)), maxH }
   }
-  // Half-page column: (stageW / 2) - gap/2, matching epub.js dual divisor math.
   const maxW = Math.max(48, Math.floor(stageW / 2 - gap / 2))
-  return { maxW: Math.max(64, Math.floor(maxW * 0.96)), maxH }
+  return { maxW: Math.max(64, Math.floor(maxW * 0.94)), maxH }
 }
 
-/**
- * Baseline stylesheet for paginated chapters.
- * Prefer 100vw as CSS fallback; JS still applies pixel caps (authoritative).
- */
+/** Fallback CSS only — real caps come from injectMediaFitStyles(box). Never use vw/%. */
 export function paginatedMediaCss(): string {
   return `
 html body img,
-html body img[class],
 html body picture,
 html body video,
 html body canvas,
@@ -60,8 +50,85 @@ html body figure {
   display: block !important;
   float: none !important;
   min-width: 0 !important;
-  max-width: 100vw !important;
-  max-height: 92vh !important;
+  object-fit: contain !important;
+  box-sizing: border-box !important;
+  break-inside: avoid-column !important;
+  page-break-inside: avoid !important;
+  -webkit-column-break-inside: avoid !important;
+}
+`.trim()
+}
+
+export function paginatedMediaThemeRules(): Record<string, Record<string, string>> {
+  const media = {
+    display: 'block !important',
+    float: 'none !important',
+    'min-width': '0 !important',
+    'object-fit': 'contain !important',
+    'box-sizing': 'border-box !important',
+    'break-inside': 'avoid-column !important',
+    'page-break-inside': 'avoid !important',
+    '-webkit-column-break-inside': 'avoid !important',
+    'background-color': 'transparent !important',
+  }
+  return {
+    'img, picture, video, canvas, svg, figure': media,
+    'div:has(> img), div:has(> svg), div:has(> picture), p:has(> img), p:has(> svg)': {
+      'min-width': '0 !important',
+      'box-sizing': 'border-box !important',
+      'background-color': 'transparent !important',
+    },
+    'figcaption, caption, [class*="caption"], [class*="image-title"], [class*="img-title"]': {
+      opacity: '1 !important',
+    },
+  }
+}
+
+/**
+ * Authoritative pixel caps — pinned last under <html>. Uses px only (no vw/%).
+ */
+export function injectMediaFitStyles(doc: Document, box: ColumnPageBox, mode: MediaFitMode): void {
+  const id = 'qingyue-media-fit'
+  let el = doc.getElementById(id) as HTMLStyleElement | null
+  if (!el) {
+    el = doc.createElement('style')
+    el.id = id
+  }
+  const root = doc.documentElement
+  if (el.parentNode) el.parentNode.removeChild(el)
+  root.appendChild(el)
+
+  root.style.setProperty('--qy-page-w', `${box.maxW}px`)
+  root.style.setProperty('--qy-page-h', `${box.maxH}px`)
+
+  if (mode === 'scroll') {
+    el.textContent = `
+html body img, html body picture, html body video, html body canvas, html body svg {
+  max-width: 100% !important;
+  height: auto !important;
+  object-fit: contain !important;
+}
+`.trim()
+    return
+  }
+
+  el.textContent = `
+html body img,
+html body img[class],
+html body img[style],
+html body picture,
+html body video,
+html body canvas,
+html body svg,
+html body svg[class],
+html body figure {
+  display: block !important;
+  float: none !important;
+  clear: both !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: ${box.maxW}px !important;
+  max-height: ${box.maxH}px !important;
   object-fit: contain !important;
   box-sizing: border-box !important;
   break-inside: avoid-column !important;
@@ -74,55 +141,23 @@ html body div:has(> picture),
 html body div:has(> svg),
 html body p:has(> img),
 html body p:has(> picture),
-html body p:has(> svg) {
-  max-width: 100vw !important;
+html body p:has(> svg),
+html body center:has(> img),
+html body span:has(> img) {
+  max-width: ${box.maxW}px !important;
+  min-width: 0 !important;
   box-sizing: border-box !important;
+  overflow-x: hidden !important;
   break-inside: avoid-column !important;
-  page-break-inside: avoid !important;
   -webkit-column-break-inside: avoid !important;
 }
 html body table {
-  max-width: 100vw !important;
+  max-width: ${box.maxW}px !important;
   table-layout: fixed !important;
   word-break: break-word !important;
   box-sizing: border-box !important;
 }
 `.trim()
-}
-
-/** Rules object for epub.js themes.default() when pageTurn !== scroll. */
-export function paginatedMediaThemeRules(): Record<string, Record<string, string>> {
-  const media = {
-    'max-width': '100vw !important',
-    'max-height': '92vh !important',
-    'object-fit': 'contain !important',
-    'box-sizing': 'border-box !important',
-    'break-inside': 'avoid-column !important',
-    'page-break-inside': 'avoid !important',
-    '-webkit-column-break-inside': 'avoid !important',
-    'background-color': 'transparent !important',
-  }
-  const wrapAvoid = {
-    'max-width': '100vw !important',
-    'box-sizing': 'border-box !important',
-    'break-inside': 'avoid-column !important',
-    'page-break-inside': 'avoid !important',
-    '-webkit-column-break-inside': 'avoid !important',
-    'background-color': 'transparent !important',
-  }
-  return {
-    'img, picture, video, canvas, svg, figure': media,
-    'div:has(> img), div:has(> svg), div:has(> picture), p:has(> img), p:has(> svg)': wrapAvoid,
-    'figcaption, caption, [class*="caption"], [class*="image-title"], [class*="img-title"]': {
-      opacity: '1 !important',
-    },
-    table: {
-      'max-width': '100vw !important',
-      'table-layout': 'fixed !important',
-      'word-break': 'break-word !important',
-      'box-sizing': 'border-box !important',
-    },
-  }
 }
 
 function parseSizeAttr(el: Element, name: string): number {
@@ -132,47 +167,37 @@ function parseSizeAttr(el: Element, name: string): number {
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 
-/**
- * Prefer natural pixels for bitmaps (truthful size), then HTML attrs, then current box.
- * Skip %-based width/height attributes (common in CN EPUBs).
- */
 export function resolveMediaIntrinsicSize(el: HTMLElement | SVGElement): { w: number; h: number } | null {
   const attrW = parseSizeAttr(el, 'width')
   const attrH = parseSizeAttr(el, 'height')
 
-  let natW = 0
-  let natH = 0
   if (el instanceof HTMLImageElement) {
-    natW = el.naturalWidth || 0
-    natH = el.naturalHeight || 0
-    // Decoded bitmap size is authoritative when available.
-    if (natW >= 2 && natH >= 2) return { w: natW, h: natH }
+    const nw = el.naturalWidth || 0
+    const nh = el.naturalHeight || 0
+    // 1×1 / tiny decoded bitmaps often rely on HTML attrs for layout size.
+    if (attrW >= 2 && attrH >= 2 && (nw <= 2 || nh <= 2 || attrW > nw * 2 || attrH > nh * 2)) {
+      return { w: attrW, h: attrH }
+    }
+    if (nw >= 2 && nh >= 2) return { w: nw, h: nh }
   } else if (el instanceof HTMLVideoElement) {
-    natW = el.videoWidth || 0
-    natH = el.videoHeight || 0
-    if (natW >= 2 && natH >= 2) return { w: natW, h: natH }
+    if (el.videoWidth >= 2 && el.videoHeight >= 2) return { w: el.videoWidth, h: el.videoHeight }
   } else if (el instanceof HTMLCanvasElement) {
-    natW = el.width || 0
-    natH = el.height || 0
-    if (natW >= 2 && natH >= 2) return { w: natW, h: natH }
+    if (el.width >= 2 && el.height >= 2) return { w: el.width, h: el.height }
   } else if (el instanceof SVGElement) {
-    natW = attrW
-    natH = attrH
-    if (!natW || !natH) {
+    let w = attrW
+    let h = attrH
+    if (!w || !h) {
       const vb = el.getAttribute('viewBox')?.trim().split(/[\s,]+/)
       if (vb && vb.length >= 4) {
-        natW = parseFloat(vb[2]) || 0
-        natH = parseFloat(vb[3]) || 0
+        w = parseFloat(vb[2]) || 0
+        h = parseFloat(vb[3]) || 0
       }
     }
+    if (w >= 2 && h >= 2) return { w, h }
   }
 
   if (attrW >= 2 && attrH >= 2) return { w: attrW, h: attrH }
-  if (natW >= 2 && natH >= 2) return { w: natW, h: natH }
-  if (attrW >= 2 && natH >= 2) return { w: attrW, h: natH }
-  if (natW >= 2 && attrH >= 2) return { w: natW, h: attrH }
 
-  // Inline style width/height in px (publisher often sizes covers this way).
   if (el instanceof HTMLElement) {
     const sw = parseFloat(el.style.width)
     const sh = parseFloat(el.style.height)
@@ -181,21 +206,11 @@ export function resolveMediaIntrinsicSize(el: HTMLElement | SVGElement): { w: nu
       Number.isFinite(sh) &&
       sw >= 2 &&
       sh >= 2 &&
-      /px/i.test(el.style.width) &&
-      /px/i.test(el.style.height)
+      /px/i.test(el.style.width || '') &&
+      /px/i.test(el.style.height || '')
     ) {
       return { w: sw, h: sh }
     }
-  }
-
-  try {
-    // Prefer getClientRects union only when not fragmented; else skip (unreliable).
-    const rects = el.getClientRects()
-    if (rects.length === 1 && rects[0].width >= 2 && rects[0].height >= 2) {
-      return { w: rects[0].width, h: rects[0].height }
-    }
-  } catch {
-    /* */
   }
   return null
 }
@@ -207,10 +222,34 @@ function applyScrollMedia(el: HTMLElement | SVGElement) {
   el.style.removeProperty('height')
 }
 
+export function clampMediaAncestors(el: HTMLElement, box: ColumnPageBox): void {
+  const maxWCss = `${box.maxW}px`
+  const doc = el.ownerDocument
+  let p: HTMLElement | null = el.parentElement
+  let depth = 0
+  while (p && p !== doc.body && p !== doc.documentElement && depth < 12) {
+    p.style.setProperty('max-width', maxWCss, 'important')
+    p.style.setProperty('min-width', '0', 'important')
+    p.style.setProperty('box-sizing', 'border-box', 'important')
+    p.style.setProperty('overflow-x', 'hidden', 'important')
+    p.style.setProperty('break-inside', 'avoid-column', 'important')
+    p.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
+    p.style.setProperty('float', 'none', 'important')
+
+    const attrW = p.getAttribute('width') || ''
+    const styleW = p.style.width || ''
+    if (/px|pt|cm|mm|in|%/i.test(attrW) || /px|pt|cm|mm|in|%/i.test(styleW)) {
+      p.style.setProperty('width', 'auto', 'important')
+    }
+    p = p.parentElement
+    depth += 1
+  }
+}
+
 function applyPaginatedMedia(el: HTMLElement | SVGElement, box: ColumnPageBox) {
-  // Pixel caps only — never max-width:100% (multicol % = whole strip).
   el.style.setProperty('display', 'block', 'important')
   el.style.setProperty('float', 'none', 'important')
+  el.style.setProperty('clear', 'both', 'important')
   el.style.setProperty('min-width', '0', 'important')
   el.style.setProperty('min-height', '0', 'important')
   el.style.setProperty('max-width', `${box.maxW}px`, 'important')
@@ -226,105 +265,41 @@ function applyPaginatedMedia(el: HTMLElement | SVGElement, box: ColumnPageBox) {
     const scale = Math.min(1, box.maxW / intrinsic.w, box.maxH / intrinsic.h)
     const w = Math.max(1, Math.round(intrinsic.w * scale))
     const h = Math.max(1, Math.round(intrinsic.h * scale))
-    // Explicit px beats presentational attrs and avoids 1×1 collapse from height:auto.
     el.style.setProperty('width', `${w}px`, 'important')
     el.style.setProperty('height', `${h}px`, 'important')
+  } else {
+    // Not decoded yet — still force a hard width ceiling so layout cannot expand columns.
+    el.style.setProperty('width', `${box.maxW}px`, 'important')
+    el.style.setProperty('height', 'auto', 'important')
   }
 
-  // Publisher wrappers with fixed px widths still expand the multicol strip and
-  // slice the figure across pages — clamp the whole ancestor chain.
   if (el instanceof HTMLElement) clampMediaAncestors(el, box)
 }
 
-/**
- * Walk up from a media node and kill fixed widths that spill into the next column.
- */
-export function clampMediaAncestors(el: HTMLElement, box: ColumnPageBox): void {
-  const maxWCss = `${box.maxW}px`
-  const doc = el.ownerDocument
-  let p: HTMLElement | null = el.parentElement
-  let depth = 0
-  while (p && p !== doc.body && p !== doc.documentElement && depth < 10) {
-    p.style.setProperty('max-width', maxWCss, 'important')
-    p.style.setProperty('box-sizing', 'border-box', 'important')
-    p.style.setProperty('overflow-x', 'hidden', 'important')
-    p.style.setProperty('break-inside', 'avoid-column', 'important')
-    p.style.setProperty('page-break-inside', 'avoid', 'important')
-    p.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
-    p.style.setProperty('float', 'none', 'important')
-    p.style.setProperty('min-width', '0', 'important')
-
-    const attrW = p.getAttribute('width') || ''
-    const styleW = p.style.width || ''
-    if (/px|pt|cm|mm|in/i.test(attrW) || /px|pt|cm|mm|in/i.test(styleW)) {
-      p.style.setProperty('width', 'auto', 'important')
-    }
-    // Percent widths against the expanded strip also blow past the page box.
-    if (/%/.test(styleW) || /%/.test(attrW)) {
-      p.style.setProperty('width', 'auto', 'important')
-    }
-
-    p = p.parentElement
-    depth += 1
-  }
-}
-
-function applyWrapperAvoid(el: HTMLElement, box: ColumnPageBox) {
-  el.style.setProperty('max-width', `${box.maxW}px`, 'important')
-  el.style.setProperty('box-sizing', 'border-box', 'important')
-  el.style.setProperty('break-inside', 'avoid-column', 'important')
-  el.style.setProperty('page-break-inside', 'avoid', 'important')
-  el.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
-}
-
-/**
- * Clamp publisher tables / fixed-width blocks that spill into the next column.
- */
 export function fitWideBlocksInDocument(doc: Document, box: ColumnPageBox): void {
   const maxWCss = `${box.maxW}px`
-
-  doc.querySelectorAll('table').forEach((node) => {
+  doc.querySelectorAll('table, pre').forEach((node) => {
     if (!(node instanceof HTMLElement)) return
     node.style.setProperty('max-width', maxWCss, 'important')
     node.style.setProperty('width', 'auto', 'important')
-    node.style.setProperty('table-layout', 'fixed', 'important')
-    node.style.setProperty('word-break', 'break-word', 'important')
     node.style.setProperty('box-sizing', 'border-box', 'important')
-  })
-
-  // Fixed-width / nowrap blocks that visually act like "cards".
-  doc.querySelectorAll('div, section, article, center, pre').forEach((node) => {
-    if (!(node instanceof HTMLElement)) return
-    const styleW = node.style.width || node.getAttribute('width') || ''
-    const hasFixed =
-      /px|pt|cm|mm|in/i.test(styleW) ||
-      node.style.whiteSpace === 'nowrap' ||
-      node.getAttribute('align') === 'center'
-    let measured = 0
-    try {
-      measured = node.getBoundingClientRect().width
-    } catch {
-      /* */
-    }
-    if (!hasFixed && measured <= box.maxW + 4) return
-    if (measured > 0 && measured <= box.maxW + 4 && !hasFixed) return
-    node.style.setProperty('max-width', maxWCss, 'important')
-    node.style.setProperty('box-sizing', 'border-box', 'important')
-    node.style.setProperty('overflow-x', 'hidden', 'important')
-    if (/px|pt|cm|mm|in/i.test(styleW)) {
-      node.style.setProperty('width', 'auto', 'important')
+    if (node.tagName.toLowerCase() === 'table') {
+      node.style.setProperty('table-layout', 'fixed', 'important')
+      node.style.setProperty('word-break', 'break-word', 'important')
     }
   })
 }
 
 /**
- * Fit media into the column page box. Does not remove width/height attributes.
+ * Fit every media node into the host page box. Call after theme paint / load / relocate.
  */
 export function fitMediaInDocument(
   doc: Document,
   box: ColumnPageBox,
   mode: MediaFitMode,
 ): void {
+  injectMediaFitStyles(doc, box, mode)
+
   doc.querySelectorAll('img, video, canvas, picture, svg').forEach((node) => {
     if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) return
     if (node instanceof HTMLElement && node.tagName.toLowerCase() === 'picture') {
@@ -333,7 +308,11 @@ export function fitMediaInDocument(
         if (mode === 'scroll') applyScrollMedia(img)
         else applyPaginatedMedia(img, box)
       }
-      if (mode === 'paginated') applyWrapperAvoid(node, box)
+      if (mode === 'paginated') {
+        node.style.setProperty('max-width', `${box.maxW}px`, 'important')
+        node.style.setProperty('display', 'block', 'important')
+        clampMediaAncestors(node, box)
+      }
       return
     }
     if (mode === 'scroll') applyScrollMedia(node)
@@ -342,20 +321,9 @@ export function fitMediaInDocument(
 
   if (mode !== 'paginated') return
 
-  doc.querySelectorAll('figure').forEach((node) => {
-    if (node instanceof HTMLElement) applyWrapperAvoid(node, box)
-  })
-  doc
-    .querySelectorAll(
-      'div:has(> img), div:has(> picture), div:has(> svg), p:has(> img), p:has(> picture), p:has(> svg)',
-    )
-    .forEach((node) => {
-      if (node instanceof HTMLElement) applyWrapperAvoid(node, box)
-    })
-
   fitWideBlocksInDocument(doc, box)
 
-  // Second pass: anything still fragmented / overflowing the page box → force smaller.
+  // Verify: anything still wider/taller/fragmented → shrink harder.
   doc.querySelectorAll('img, svg, video, canvas').forEach((node) => {
     if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) return
     let rects: DOMRectList
@@ -364,32 +332,27 @@ export function fitMediaInDocument(
     } catch {
       return
     }
-    const fragmented = rects.length > 1
-    const tooWide = (rects[0]?.width ?? 0) > box.maxW + 2
-    const tooTall = (rects[0]?.height ?? 0) > box.maxH + 2
-    if (!fragmented && !tooWide && !tooTall) return
+    const w = rects[0]?.width ?? 0
+    const h = rects[0]?.height ?? 0
+    if (rects.length <= 1 && w <= box.maxW + 1 && h <= box.maxH + 1) return
     applyPaginatedMedia(node, {
-      maxW: Math.max(48, Math.floor(box.maxW * 0.88)),
-      maxH: Math.max(48, Math.floor(box.maxH * 0.88)),
+      maxW: Math.max(48, Math.floor(box.maxW * 0.85)),
+      maxH: Math.max(48, Math.floor(box.maxH * 0.85)),
     })
   })
 }
 
 const LOAD_REFIT_ATTR = 'data-qy-media-refit'
 
-/**
- * Bind image/video load → debounced onChange. Idempotent per document.
- * Returns dispose function.
- */
 export function bindMediaLoadRefit(
   doc: Document,
   onChange: () => void,
-  debounceMs = 80,
+  debounceMs = 60,
 ): () => void {
   const root = doc.documentElement
   if (root.getAttribute(LOAD_REFIT_ATTR) === '1') {
     return () => {
-      /* already bound for this document */
+      /* already bound */
     }
   }
   root.setAttribute(LOAD_REFIT_ATTR, '1')
@@ -418,6 +381,7 @@ export function bindMediaLoadRefit(
   doc.addEventListener('load', onLoad, true)
   doc.querySelectorAll('img').forEach((img) => {
     if (!img.complete) img.addEventListener('load', schedule, { once: true })
+    else schedule()
   })
 
   return () => {

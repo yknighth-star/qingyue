@@ -27,6 +27,7 @@ import {
   fitMediaInDocument,
   paginatedMediaCss,
   paginatedMediaThemeRules,
+  resolveColumnPageBox,
   type ColumnPageBox,
 } from '@/utils/epubMediaFit'
 
@@ -187,6 +188,8 @@ export class EpubEngine implements ReaderEngine {
       // Re-assert theme after page turn — publisher CSS/scripts often repaint late on mobile.
       // Soft path: stylesheet + html/body only (avoids full subtree thrash on dual-column).
       if (this.settings) this.reassertThemeColors(this.settings)
+      // Hard re-fit media every page — publisher scripts / late decode undo caps on mobile.
+      this.containOverflowMediaAll()
     })
 
     // Background location map → stable book-level 当前/总页 (estimate).
@@ -1392,6 +1395,8 @@ html body h6 {
         if (this.themeApplyDepth > 0 || performance.now() < this.themeQuietUntil) return
         // Soft by default: full wash only when our theme sheet lost cascade order.
         this.applyThemeColorsToDocument(doc, settings, force)
+        // Theme pin-last can sit above media-fit — re-apply pixel page-box caps.
+        this.containOverflowMedia(doc)
       }, 120)
       this.themeGuardTimers.set(doc, timer)
     }
@@ -1409,7 +1414,7 @@ html body h6 {
         if (m.type !== 'childList') continue
         for (const n of m.addedNodes) {
           if (!(n instanceof HTMLElement)) continue
-          if (n.id === 'qingyue-theme' || n.id === 'qingyue-typography') continue
+          if (n.id === 'qingyue-theme' || n.id === 'qingyue-typography' || n.id === 'qingyue-media-fit') continue
           const tag = n.tagName
           if (
             tag === 'STYLE' ||
@@ -1654,7 +1659,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       if (depth > 8) return
       const tag = el.tagName.toLowerCase()
       if (isMedia(tag)) return
-      if (el.id === 'qingyue-theme' || el.id === 'qingyue-typography') return
+      if (el.id === 'qingyue-theme' || el.id === 'qingyue-typography' || el.id === 'qingyue-media-fit') return
 
       let cs: CSSStyleDeclaration
       try {
@@ -2022,37 +2027,26 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
    */
   private containOverflowMedia(doc: Document) {
     const mode = this.pageTurn === 'scroll' ? 'scroll' : 'paginated'
-    // Prefer engine lastSize (stage page box) when known — more stable than iframe metrics.
-    let box: ColumnPageBox
-    if (this.lastSize.w >= 64 && this.lastSize.h >= 64) {
-      const dual = this.settings ? this.isDualSpread(this.settings) : false
-      const gap = dual ? 40 : 0
-      const stageW = this.lastSize.w
-      const stageH = this.lastSize.h
-      const maxH = Math.max(96, Math.floor(stageH * (stageH < 700 ? 0.82 : 0.9)))
-      const maxW = dual
-        ? Math.max(64, Math.floor((stageW / 2 - gap / 2) * 0.96))
-        : Math.max(64, Math.floor(stageW * 0.96))
-      box = { maxW, maxH }
-    } else {
-      box = {
-        maxW: this.mediaMaxWidthPx(doc),
-        maxH: this.mediaMaxHeightPx(doc),
-      }
+    // Host stage page box only — never iframe vw (expand() makes vw = full strip).
+    let stageW = this.lastSize.w
+    let stageH = this.lastSize.h
+    if ((stageW < 64 || stageH < 64) && this.container) {
+      const scroller = this.container.querySelector('.epub-container') as HTMLElement | null
+      stageW = scroller?.clientWidth || 0
+      const cs = getComputedStyle(this.container)
+      const pl = parseFloat(cs.paddingLeft) || 0
+      const pr = parseFloat(cs.paddingRight) || 0
+      const pt = parseFloat(cs.paddingTop) || 0
+      const pb = parseFloat(cs.paddingBottom) || 0
+      if (!stageW) stageW = Math.max(0, this.container.clientWidth - pl - pr)
+      if (stageH < 64) stageH = Math.max(0, this.container.clientHeight - pt - pb)
     }
-    fitMediaInDocument(doc, box, mode)
+    if (stageW < 64) stageW = typeof window !== 'undefined' ? Math.min(window.innerWidth, 430) : 360
+    if (stageH < 64) stageH = typeof window !== 'undefined' ? window.innerHeight : 640
 
-    if (mode === 'paginated') {
-      const maxWCss = `${box.maxW}px`
-      // Wrappers with fixed publisher widths still push the column strip wider.
-      doc.querySelectorAll('div, p, figure, span, center').forEach((node) => {
-        if (!(node instanceof HTMLElement)) return
-        if (!node.querySelector(':scope > img, :scope > picture, :scope > svg, :scope > video')) return
-        node.style.setProperty('max-width', maxWCss, 'important')
-        node.style.setProperty('box-sizing', 'border-box', 'important')
-        node.style.setProperty('overflow-x', 'hidden', 'important')
-      })
-    }
+    const dual = this.settings ? this.isDualSpread(this.settings) : false
+    const box: ColumnPageBox = resolveColumnPageBox({ stageW, stageH, dual })
+    fitMediaInDocument(doc, box, mode)
 
     // Do not force iframe/body width in paginated mode — that collapses epub.js multi-page expand.
     if (this.pageTurn !== 'scroll') return
@@ -2083,73 +2077,6 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     } catch {
       /* ignore */
     }
-  }
-
-  /** Visible page/column width — prefer host stage, never trust iframe innerWidth alone. */
-  private mediaMaxWidthPx(doc: Document): number {
-    let w = 0
-    // 1) Host stage / epub scroller = true one-page viewport (most reliable on phone).
-    if (this.container) {
-      const scroller = this.container.querySelector('.epub-container') as HTMLElement | null
-      w = scroller?.clientWidth || 0
-      if (!w) {
-        const cs = getComputedStyle(this.container)
-        const pl = parseFloat(cs.paddingLeft) || 0
-        const pr = parseFloat(cs.paddingRight) || 0
-        w = Math.max(0, this.container.clientWidth - pl - pr)
-      }
-    }
-    // 2) Iframe element box (not content scrollWidth / expanded multicol strip).
-    if (!w) {
-      try {
-        const iframe = doc.defaultView?.frameElement as HTMLIFrameElement | null
-        if (iframe?.clientWidth) w = iframe.clientWidth
-      } catch {
-        /* */
-      }
-    }
-    // 3) lastSize from engine resize
-    if (!w && this.lastSize.w >= 64) w = this.lastSize.w
-    // 4) Last resort — may be wrong during multicol expand; keep as fallback only.
-    if (!w) {
-      const win = doc.defaultView
-      if (win && win.innerWidth > 0 && win.innerWidth < 2000) w = win.innerWidth
-    }
-    if (!w) w = typeof window !== 'undefined' ? Math.min(window.innerWidth, 480) : 360
-
-    // Dual spread: two pages share the view — each column is about half.
-    if (this.settings && this.isDualSpread(this.settings)) {
-      w = Math.max(120, Math.floor((w - 40) / 2))
-    }
-    return Math.max(64, Math.floor(w * 0.96))
-  }
-
-  /** Page box height for media fit (one column / screen). */
-  private mediaMaxHeightPx(doc: Document): number {
-    let h = 0
-    if (this.container) {
-      const cs = getComputedStyle(this.container)
-      const pt = parseFloat(cs.paddingTop) || 0
-      const pb = parseFloat(cs.paddingBottom) || 0
-      h = Math.max(0, this.container.clientHeight - pt - pb)
-    }
-    if (!h) {
-      try {
-        const iframe = doc.defaultView?.frameElement as HTMLIFrameElement | null
-        if (iframe?.clientHeight) h = iframe.clientHeight
-      } catch {
-        /* */
-      }
-    }
-    if (!h && this.lastSize.h >= 64) h = this.lastSize.h
-    if (!h) {
-      const win = doc.defaultView
-      if (win && win.innerHeight > 0 && win.innerHeight < 2000) h = win.innerHeight
-    }
-    if (!h) h = typeof window !== 'undefined' ? window.innerHeight : 640
-    // Leave headroom for captions sharing the same column on small phones.
-    const ratio = h < 700 ? 0.82 : 0.9
-    return Math.max(96, Math.floor(h * ratio))
   }
 
   /** Re-fit images after stage resize / late decode (all open chapter docs). */
