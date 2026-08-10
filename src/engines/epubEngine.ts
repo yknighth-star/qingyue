@@ -22,6 +22,13 @@ import { injectCaretSuppression } from '@/utils/suppressCaret'
 import type { MarkHandleRects } from '@/utils/markSelect'
 import { searchEpubBook } from './epubSearch'
 import { revokeFontUrlCache, remapBookCssFonts, rewriteEpubFontUrls } from './epubFontUrls'
+import {
+  bindMediaLoadRefit,
+  fitMediaInDocument,
+  paginatedMediaCss,
+  paginatedMediaThemeRules,
+  type ColumnPageBox,
+} from '@/utils/epubMediaFit'
 
 type ContentsDoc = {
   document: Document
@@ -67,10 +74,15 @@ export class EpubEngine implements ReaderEngine {
   private readonly searchHl = createSearchHighlightState()
   private resizeObserver: ResizeObserver | null = null
   private resizeTimer: number | null = null
+  private mediaRefitTimer: number | null = null
+  private mediaRefitDisposers: Array<() => void> = []
   private lastSize = { w: 0, h: 0 }
   /** True while page-turn animation runs — ignore ResizeObserver (prevents shake). */
   private layoutLocked = false
   private overflowLocked = false
+  /** Guard: media-load reflow must not re-enter applyResize recursively. */
+  private mediaReflowing = false
+  private mediaQuietUntil = 0
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -157,6 +169,8 @@ export class EpubEngine implements ReaderEngine {
         h: Math.max(64, Math.round(container.clientHeight - pt - pb)),
       }
     }
+    // Content hooks may have run before lastSize was known — refit with real page box.
+    this.containOverflowMediaAll()
     this.observeResize(container)
 
     this.curl.onBusyChange((b) => {
@@ -250,6 +264,7 @@ export class EpubEngine implements ReaderEngine {
     if (!force && Math.abs(w - this.lastSize.w) < 2 && Math.abs(h - this.lastSize.h) < 2) return
 
     this.lastSize = { w, h }
+    this.containOverflowMediaAll()
 
     // epub.js manager.resize early-returns when _stageSize matches; chrome toggle can
     // update the DOM container via height:100% without going through that path, leaving
@@ -275,6 +290,33 @@ export class EpubEngine implements ReaderEngine {
       if (this.settings) this.applyTypographyToAllContents(this.settings)
       this.containOverflowMediaAll()
     }, 60)
+  }
+
+  /** Late-loading images change column geometry — refit then force a soft reflow. */
+  private scheduleMediaReflow() {
+    if (this.pageTurn === 'scroll') {
+      this.containOverflowMediaAll()
+      return
+    }
+    if (this.mediaReflowing || this.layoutLocked) return
+    if (performance.now() < this.mediaQuietUntil) {
+      this.containOverflowMediaAll()
+      return
+    }
+    if (this.mediaRefitTimer) window.clearTimeout(this.mediaRefitTimer)
+    this.mediaRefitTimer = window.setTimeout(() => {
+      this.mediaRefitTimer = null
+      if (this.mediaReflowing || this.layoutLocked) return
+      this.mediaReflowing = true
+      this.mediaQuietUntil = performance.now() + 450
+      try {
+        this.containOverflowMediaAll()
+        this.applyResize(true)
+        this.snapPaginatedScroll()
+      } finally {
+        this.mediaReflowing = false
+      }
+    }, 100)
   }
 
   /**
@@ -404,18 +446,8 @@ export class EpubEngine implements ReaderEngine {
     }
     // After theme paint so inline media caps win; re-fit when late images decode.
     this.containOverflowMedia(doc)
-    doc.querySelectorAll('img').forEach((img) => {
-      if (!(img instanceof HTMLImageElement)) return
-      if (img.complete) return
-      img.addEventListener(
-        'load',
-        () => {
-          if (!doc.defaultView || doc.defaultView.closed) return
-          this.containOverflowMedia(doc)
-        },
-        { once: true },
-      )
-    })
+    const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
+    this.mediaRefitDisposers.push(disposeRefit)
     // Publisher @font-face relative urls resolve to about:srcdoc and Chrome blocks them.
     void this.rewriteDocFonts(doc)
     this.syncDocTouchAction(doc)
@@ -645,6 +677,16 @@ export class EpubEngine implements ReaderEngine {
     this.selectionDebounce = null
     if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
     this.resizeTimer = null
+    if (this.mediaRefitTimer) window.clearTimeout(this.mediaRefitTimer)
+    this.mediaRefitTimer = null
+    for (const dispose of this.mediaRefitDisposers) {
+      try {
+        dispose()
+      } catch {
+        /* */
+      }
+    }
+    this.mediaRefitDisposers = []
     this.resizeObserver?.disconnect()
     this.resizeObserver = null
     for (const t of this.themeRepaintTimers) window.clearTimeout(t)
@@ -1411,7 +1453,8 @@ html body h6 {
    */
   private applyThemeColorsToDocument(doc: Document, settings: ReaderSettings, force = false) {
     const { theme, bg, fg } = this.themeColors(settings)
-    const fp = `${theme}\0${bg}\0${fg}`
+    const flow = settings.pageTurn === 'scroll' ? 's' : 'p'
+    const fp = `${theme}\0${bg}\0${fg}\0${flow}`
     const root = doc.documentElement
     const id = 'qingyue-theme'
     let styleEl = doc.getElementById(id) as HTMLStyleElement | null
@@ -1533,20 +1576,6 @@ html body embed {
   background-color: transparent !important;
   -webkit-text-fill-color: initial !important;
   color: inherit !important;
-  /* 100vw = iframe page width; 100% fails inside epub.js multicol (spills to next page). */
-  max-width: 100vw !important;
-  max-height: 92vh !important;
-  object-fit: contain !important;
-  box-sizing: border-box !important;
-  break-inside: avoid !important;
-  -webkit-column-break-inside: avoid !important;
-}
-html body img,
-html body img[class],
-html body video,
-html body canvas {
-  width: auto !important;
-  height: auto !important;
 }
 html body :has(> img):not(body),
 html body :has(> svg):not(body),
@@ -1554,9 +1583,8 @@ html body :has(> picture):not(body),
 html body :has(> video):not(body),
 html body :has(> canvas):not(body) {
   background-color: transparent !important;
-  max-width: 100vw !important;
-  box-sizing: border-box !important;
 }
+${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
 `.trim()
 
       root.style.setProperty('background-color', bg, 'important')
@@ -1861,33 +1889,21 @@ html body :has(> canvas):not(body) {
           color: `${fg} !important`,
           opacity: '1 !important',
         },
-      'img, picture, video, canvas': {
-        'max-width': '100vw !important',
-        'max-height': '92vh !important',
-        width: 'auto !important',
-        height: 'auto !important',
-        'object-fit': 'contain !important',
-        'box-sizing': 'border-box !important',
-        'background-color': 'transparent !important',
-        'break-inside': 'avoid !important',
-        '-webkit-column-break-inside': 'avoid !important',
-      },
-      svg: {
-        'max-width': '100vw !important',
-        'max-height': '92vh !important',
-        'box-sizing': 'border-box !important',
-        'background-color': 'transparent !important',
-        'break-inside': 'avoid !important',
-        '-webkit-column-break-inside': 'avoid !important',
-      },
-      'div:has(> img), div:has(> svg), div:has(> picture), p:has(> img), p:has(> svg), figure': {
-        'background-color': 'transparent !important',
-        'max-width': '100vw !important',
-        'box-sizing': 'border-box !important',
-      },
-      'figcaption, caption, [class*="caption"], [class*="image-title"], [class*="img-title"]': {
-        opacity: '1 !important',
-      },
+      ...(settings.pageTurn === 'scroll'
+        ? {
+            'img, picture, video, canvas': {
+              'max-width': '100% !important',
+              'background-color': 'transparent !important',
+            },
+            svg: {
+              'max-width': '100% !important',
+              'background-color': 'transparent !important',
+            },
+            'div:has(> img), div:has(> svg), div:has(> picture), p:has(> img), p:has(> svg)': {
+              'background-color': 'transparent !important',
+            },
+          }
+        : paginatedMediaThemeRules()),
       table: {
         'max-width': '100% !important',
         'table-layout': 'fixed !important',
@@ -1995,60 +2011,29 @@ html body :has(> canvas):not(body) {
   }
 
   /**
-   * Fit media into the page/column box on phone/tablet/PC.
-   * Paginated CSS columns: max-width:100% resolves against the *expanded* multicol
-   * strip, so wide bitmaps spill into the next column ("第二页"). Cap with the
-   * iframe/page pixel width (≈ 100vw inside the chapter iframe) instead.
-   * Never strip width/height attributes on SVG (1×1 collapse).
+   * Cap media to the iframe page/column box (paginated: no cross-page splits).
+   * Pixel caps come from the chapter iframe — max-width:100% fails inside epub.js multicol.
+   * Never strip width/height attributes — that collapses many EPUB bitmaps.
    */
   private containOverflowMedia(doc: Document) {
-    const maxH = this.mediaMaxHeightPx(doc)
-    const maxW = this.mediaMaxWidthPx(doc)
-    const maxHCss = `${maxH}px`
-    const maxWCss = `${maxW}px`
-
-    const fitBitmap = (node: HTMLElement) => {
-      node.style.setProperty('max-width', maxWCss, 'important')
-      node.style.setProperty('max-height', maxHCss, 'important')
-      node.style.setProperty('width', 'auto', 'important')
-      node.style.setProperty('height', 'auto', 'important')
-      node.style.setProperty('object-fit', 'contain', 'important')
-      node.style.setProperty('box-sizing', 'border-box', 'important')
-      node.style.setProperty('break-inside', 'avoid', 'important')
-      node.style.setProperty('page-break-inside', 'avoid', 'important')
-      node.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
+    const mode = this.pageTurn === 'scroll' ? 'scroll' : 'paginated'
+    const box: ColumnPageBox = {
+      maxW: this.mediaMaxWidthPx(doc),
+      maxH: this.mediaMaxHeightPx(doc),
     }
+    fitMediaInDocument(doc, box, mode)
 
-    doc.querySelectorAll('img, video, canvas').forEach((node) => {
-      if (node instanceof HTMLElement) fitBitmap(node)
-    })
-
-    doc.querySelectorAll('picture').forEach((node) => {
-      if (!(node instanceof HTMLElement)) return
-      node.style.setProperty('max-width', maxWCss, 'important')
-      node.style.setProperty('max-height', maxHCss, 'important')
-      node.style.setProperty('box-sizing', 'border-box', 'important')
-      node.style.setProperty('break-inside', 'avoid', 'important')
-      node.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
-    })
-
-    doc.querySelectorAll('svg').forEach((node) => {
-      if (!(node instanceof SVGElement)) return
-      node.style.setProperty('max-width', maxWCss, 'important')
-      node.style.setProperty('max-height', maxHCss, 'important')
-      node.style.setProperty('box-sizing', 'border-box', 'important')
-      node.style.setProperty('break-inside', 'avoid', 'important')
-      node.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
-    })
-
-    // Wrappers with fixed publisher widths still push the column strip wider.
-    doc.querySelectorAll('div, p, figure, span, center').forEach((node) => {
-      if (!(node instanceof HTMLElement)) return
-      if (!node.querySelector(':scope > img, :scope > picture, :scope > svg, :scope > video')) return
-      node.style.setProperty('max-width', maxWCss, 'important')
-      node.style.setProperty('box-sizing', 'border-box', 'important')
-      node.style.setProperty('overflow-x', 'hidden', 'important')
-    })
+    if (mode === 'paginated') {
+      const maxWCss = `${box.maxW}px`
+      // Wrappers with fixed publisher widths still push the column strip wider.
+      doc.querySelectorAll('div, p, figure, span, center').forEach((node) => {
+        if (!(node instanceof HTMLElement)) return
+        if (!node.querySelector(':scope > img, :scope > picture, :scope > svg, :scope > video')) return
+        node.style.setProperty('max-width', maxWCss, 'important')
+        node.style.setProperty('box-sizing', 'border-box', 'important')
+        node.style.setProperty('overflow-x', 'hidden', 'important')
+      })
+    }
 
     // Do not force iframe/body width in paginated mode — that collapses epub.js multi-page expand.
     if (this.pageTurn !== 'scroll') return

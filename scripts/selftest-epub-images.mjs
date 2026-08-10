@@ -121,6 +121,46 @@ function applyContainOverflow(frame, mode) {
         if (!(node instanceof SVGElement)) return
         node.style.setProperty('max-width', '100%', 'important')
       })
+    } else if (mode === 'fit') {
+      // Mirrors src/utils/epubMediaFit.ts — scale via computed px, never width/height:auto.
+      const box = { maxW: 400, maxH: 592 }
+      const parseAttr = (el, name) => {
+        const n = parseFloat(el.getAttribute(name) || '')
+        return Number.isFinite(n) && n > 0 ? n : 0
+      }
+      document.querySelectorAll('img, video, canvas, picture, svg').forEach((node) => {
+        if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) return
+        node.style.setProperty('max-width', '100%', 'important')
+        node.style.setProperty('max-height', `${box.maxH}px`, 'important')
+        node.style.setProperty('object-fit', 'contain', 'important')
+        const attrW = parseAttr(node, 'width')
+        const attrH = parseAttr(node, 'height')
+        let natW = 0
+        let natH = 0
+        if (node instanceof HTMLImageElement) {
+          natW = node.naturalWidth || 0
+          natH = node.naturalHeight || 0
+        }
+        let w = 0
+        let h = 0
+        if (attrW >= 2 && attrH >= 2) {
+          w = attrW
+          h = attrH
+        } else if (natW >= 2 && natH >= 2) {
+          w = natW
+          h = natH
+        } else {
+          const r = node.getBoundingClientRect()
+          w = r.width
+          h = r.height
+        }
+        if (w < 2 || h < 2) return
+        const scale = Math.min(1, box.maxW / w, box.maxH / h)
+        if (scale < 1) {
+          node.style.setProperty('width', `${Math.max(1, Math.round(w * scale))}px`, 'important')
+          node.style.setProperty('height', `${Math.max(1, Math.round(h * scale))}px`, 'important')
+        }
+      })
     }
   }, mode)
 }
@@ -262,6 +302,13 @@ try {
       themeCss: themeCssSafe(),
       containMode: 'safe',
       washes: false,
+    })) && allOk
+
+  allOk =
+    (await runCase(browser, 'current-theme+fit-contain', {
+      themeCss: themeCssCurrent(),
+      containMode: 'fit',
+      washes: true,
     })) && allOk
 
   // SVG without viewBox + legacy contain (known collapse)
