@@ -2017,9 +2017,23 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
    */
   private containOverflowMedia(doc: Document) {
     const mode = this.pageTurn === 'scroll' ? 'scroll' : 'paginated'
-    const box: ColumnPageBox = {
-      maxW: this.mediaMaxWidthPx(doc),
-      maxH: this.mediaMaxHeightPx(doc),
+    // Prefer engine lastSize (stage page box) when known — more stable than iframe metrics.
+    let box: ColumnPageBox
+    if (this.lastSize.w >= 64 && this.lastSize.h >= 64) {
+      const dual = this.settings ? this.isDualSpread(this.settings) : false
+      const gap = dual ? 40 : 0
+      const stageW = this.lastSize.w
+      const stageH = this.lastSize.h
+      const maxH = Math.max(96, Math.floor(stageH * (stageH < 700 ? 0.82 : 0.9)))
+      const maxW = dual
+        ? Math.max(64, Math.floor((stageW / 2 - gap / 2) * 0.96))
+        : Math.max(64, Math.floor(stageW * 0.96))
+      box = { maxW, maxH }
+    } else {
+      box = {
+        maxW: this.mediaMaxWidthPx(doc),
+        maxH: this.mediaMaxHeightPx(doc),
+      }
     }
     fitMediaInDocument(doc, box, mode)
 
@@ -2066,16 +2080,38 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     }
   }
 
-  /** Single-page / column content width in px (not the expanded multicol strip). */
+  /** Visible page/column width — prefer host stage, never trust iframe innerWidth alone. */
   private mediaMaxWidthPx(doc: Document): number {
-    const win = doc.defaultView
     let w = 0
-    if (win && win.innerWidth > 0) w = win.innerWidth
-    if (!w && this.container) {
+    // 1) Host stage / epub scroller = true one-page viewport (most reliable on phone).
+    if (this.container) {
       const scroller = this.container.querySelector('.epub-container') as HTMLElement | null
-      w = scroller?.clientWidth || this.container.clientWidth
+      w = scroller?.clientWidth || 0
+      if (!w) {
+        const cs = getComputedStyle(this.container)
+        const pl = parseFloat(cs.paddingLeft) || 0
+        const pr = parseFloat(cs.paddingRight) || 0
+        w = Math.max(0, this.container.clientWidth - pl - pr)
+      }
     }
-    if (!w) w = typeof window !== 'undefined' ? window.innerWidth : 360
+    // 2) Iframe element box (not content scrollWidth / expanded multicol strip).
+    if (!w) {
+      try {
+        const iframe = doc.defaultView?.frameElement as HTMLIFrameElement | null
+        if (iframe?.clientWidth) w = iframe.clientWidth
+      } catch {
+        /* */
+      }
+    }
+    // 3) lastSize from engine resize
+    if (!w && this.lastSize.w >= 64) w = this.lastSize.w
+    // 4) Last resort — may be wrong during multicol expand; keep as fallback only.
+    if (!w) {
+      const win = doc.defaultView
+      if (win && win.innerWidth > 0 && win.innerWidth < 2000) w = win.innerWidth
+    }
+    if (!w) w = typeof window !== 'undefined' ? Math.min(window.innerWidth, 480) : 360
+
     // Dual spread: two pages share the view — each column is about half.
     if (this.settings && this.isDualSpread(this.settings)) {
       w = Math.max(120, Math.floor((w - 40) / 2))
@@ -2083,15 +2119,31 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     return Math.max(64, Math.floor(w * 0.96))
   }
 
-  /** Page box height for media fit (iframe viewport ≈ one column / screen). */
+  /** Page box height for media fit (one column / screen). */
   private mediaMaxHeightPx(doc: Document): number {
-    const win = doc.defaultView
     let h = 0
-    if (win && win.innerHeight > 0) h = win.innerHeight
-    if (!h && this.container) h = this.container.clientHeight
+    if (this.container) {
+      const cs = getComputedStyle(this.container)
+      const pt = parseFloat(cs.paddingTop) || 0
+      const pb = parseFloat(cs.paddingBottom) || 0
+      h = Math.max(0, this.container.clientHeight - pt - pb)
+    }
+    if (!h) {
+      try {
+        const iframe = doc.defaultView?.frameElement as HTMLIFrameElement | null
+        if (iframe?.clientHeight) h = iframe.clientHeight
+      } catch {
+        /* */
+      }
+    }
+    if (!h && this.lastSize.h >= 64) h = this.lastSize.h
+    if (!h) {
+      const win = doc.defaultView
+      if (win && win.innerHeight > 0 && win.innerHeight < 2000) h = win.innerHeight
+    }
     if (!h) h = typeof window !== 'undefined' ? window.innerHeight : 640
     // Leave headroom for captions sharing the same column on small phones.
-    const ratio = h < 700 ? 0.86 : 0.92
+    const ratio = h < 700 ? 0.82 : 0.9
     return Math.max(96, Math.floor(h * ratio))
   }
 

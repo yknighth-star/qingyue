@@ -31,11 +31,11 @@ html body img, html body picture, html body video, html body canvas, html body s
 }
 
 function fitPaginatedScript() {
-  // Injected into page — mirrors applyPaginatedMedia
+  // Injected into page — mirrors applyPaginatedMedia (pixel caps, no max-width:100%)
   return `
     function parseSizeAttr(el, name) {
       const raw = el.getAttribute(name)
-      if (!raw) return 0
+      if (!raw || /%|em|rem|vw|vh/i.test(raw)) return 0
       const n = parseFloat(raw)
       return Number.isFinite(n) && n > 0 ? n : 0
     }
@@ -46,28 +46,24 @@ function fitPaginatedScript() {
       if (el instanceof HTMLImageElement) {
         natW = el.naturalWidth || 0
         natH = el.naturalHeight || 0
+        if (natW >= 2 && natH >= 2) return { w: natW, h: natH }
       }
       if (attrW >= 2 && attrH >= 2) return { w: attrW, h: attrH }
-      if (natW >= 2 && natH >= 2) return { w: natW, h: natH }
       const r = el.getBoundingClientRect()
       if (r.width >= 2 && r.height >= 2) return { w: r.width, h: r.height }
       return null
     }
     function applyPaginated(el, box) {
-      el.style.setProperty('max-width', '100%', 'important')
+      el.style.setProperty('max-width', box.maxW + 'px', 'important')
       el.style.setProperty('max-height', box.maxH + 'px', 'important')
       el.style.setProperty('object-fit', 'contain', 'important')
+      el.style.setProperty('box-sizing', 'border-box', 'important')
       el.style.setProperty('break-inside', 'avoid-column', 'important')
       el.style.setProperty('page-break-inside', 'avoid', 'important')
       el.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
       const intrinsic = resolveIntrinsic(el)
       if (!intrinsic) return
       const scale = Math.min(1, box.maxW / intrinsic.w, box.maxH / intrinsic.h)
-      if (!(scale < 1)) {
-        el.style.removeProperty('width')
-        el.style.removeProperty('height')
-        return
-      }
       el.style.setProperty('width', Math.max(1, Math.round(intrinsic.w * scale)) + 'px', 'important')
       el.style.setProperty('height', Math.max(1, Math.round(intrinsic.h * scale)) + 'px', 'important')
     }
