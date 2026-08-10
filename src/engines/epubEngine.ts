@@ -8,6 +8,7 @@ import {
   isFigureTitleLike,
   isTransparentCssColor,
   resolveSurfaceBackgroundCss,
+  resolveSvgTextFill,
 } from '@/utils/colorContrast'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
@@ -1595,11 +1596,9 @@ html body picture,
 html body object,
 html body embed {
   background-color: transparent !important;
-  -webkit-text-fill-color: initial !important;
-  color: inherit !important;
 }
+/* Do NOT set color/fill on svg — currentColor would turn black-bar titles dark. */
 html body :has(> img):not(body),
-html body :has(> svg):not(body),
 html body :has(> picture):not(body),
 html body :has(> video):not(body),
 html body :has(> canvas):not(body) {
@@ -1741,12 +1740,13 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         nextDark = true
         nextFg = lightOnDark
       } else if (titleLike) {
-        // Title-like with transparent computed bg: still check inline black styles / bgcolor.
         const inline = el.getAttribute('style') || ''
         const looksBlack =
           /background(-color)?\s*:\s*(#0{3,8}|black|rgb\(\s*0\s*,\s*0\s*,\s*0)/i.test(inline) ||
           /^(#0{3,8}|black)$/i.test(el.getAttribute('bgcolor') || '')
-        if (looksBlack) {
+        // Caption near a figure often overlays a black title bar — theme-dark text covers it.
+        const nearFigure = !!el.parentElement?.querySelector('img, svg, picture, object')
+        if (looksBlack || nearFigure) {
           nextFg = lightOnDark
           nextDark = true
           applyText(el, lightOnDark, true)
@@ -1763,6 +1763,44 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     for (const child of Array.from(body.children)) {
       if (child instanceof HTMLElement) walk(child, 0, fg, false)
     }
+
+    // SVG diagrams: title text uses fill/currentColor, not CSS color. HTML wash skips <svg>.
+    this.paintSvgTextContrast(doc, lightOnDark, fg)
+  }
+
+  /**
+   * Fix SVG <text>/<tspan> contrast. Body theme color becomes currentColor fill,
+   * turning white-on-black bars (e.g. 「朱重八家族」) into dark-on-black.
+   */
+  private paintSvgTextContrast(doc: Document, light: string, dark: string) {
+    const win = doc.defaultView
+    let currentColor = dark
+    try {
+      if (doc.body && win) currentColor = win.getComputedStyle(doc.body).color || dark
+    } catch {
+      /* */
+    }
+
+    doc.querySelectorAll('svg').forEach((svg) => {
+      if (!(svg instanceof SVGSVGElement)) return
+      svg.querySelectorAll('text').forEach((node) => {
+        if (!(node instanceof SVGTextElement)) return
+        const fill = resolveSvgTextFill({
+          textEl: node,
+          light,
+          dark,
+          currentColor,
+        })
+        node.style.setProperty('fill', fill, 'important')
+        node.style.setProperty('color', fill, 'important')
+        node.querySelectorAll('tspan').forEach((t) => {
+          if (t instanceof SVGTSpanElement) {
+            t.style.setProperty('fill', fill, 'important')
+            t.style.setProperty('color', fill, 'important')
+          }
+        })
+      })
+    })
   }
 
   /** Match iframe / epub-view chrome to theme — gaps around columns show host bg. */

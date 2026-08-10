@@ -179,3 +179,89 @@ export function isDarkSurfaceCss(surfaceCss: string | null): boolean {
   if (!surfaceCss) return false
   return isDarkDecorativeBackground(surfaceCss)
 }
+
+/** Parse SVG/CSS fill into a comparable color string, or null if none/url/gradient. */
+export function parsePaintColor(paint: string | null | undefined): string | null {
+  if (!paint) return null
+  const s = paint.trim().toLowerCase()
+  if (!s || s === 'none' || s === 'transparent') return null
+  if (s === 'currentcolor') return 'currentColor'
+  if (/url\(/i.test(s)) return null
+  if (isDarkDecorativeBackground(s) || !isTransparentCssColor(s)) return s
+  const rgb = parseCssColor(s)
+  if (!rgb) return null
+  return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`
+}
+
+export function isDarkPaint(paint: string | null | undefined, currentColorCss?: string): boolean {
+  if (!paint) return false
+  if (paint === 'currentColor') {
+    return currentColorCss ? isDarkDecorativeBackground(currentColorCss) : true
+  }
+  return isDarkDecorativeBackground(paint)
+}
+
+/**
+ * Decide fill for an SVG <text>: light when its anchor sits on a dark shape,
+ * otherwise theme foreground (for labels on white diagram areas).
+ */
+export function resolveSvgTextFill(opts: {
+  textEl: SVGTextElement
+  light: string
+  dark: string
+  currentColor: string
+}): string {
+  const { textEl, light, dark, currentColor } = opts
+  const svg = textEl.ownerSVGElement
+  if (!svg) return dark
+
+  let cx = 0
+  let cy = 0
+  try {
+    const b = textEl.getBBox()
+    cx = b.x + b.width / 2
+    cy = b.y + b.height / 2
+  } catch {
+    return dark
+  }
+
+  const shapes = svg.querySelectorAll('rect, path, circle, ellipse, polygon, polyline')
+  let onDark = false
+  for (const shape of shapes) {
+    if (!(shape instanceof SVGGeometryElement)) continue
+    const fillAttr = shape.getAttribute('fill')
+    const fillCs = (() => {
+      try {
+        return shape.ownerDocument.defaultView?.getComputedStyle(shape).fill
+      } catch {
+        return null
+      }
+    })()
+    const paint = parsePaintColor(fillAttr) || parsePaintColor(fillCs || undefined)
+    if (!paint || paint === 'none') continue
+    if (!isDarkPaint(paint, currentColor)) continue
+    try {
+      const pt = svg.createSVGPoint()
+      pt.x = cx
+      pt.y = cy
+      if (typeof shape.isPointInFill === 'function' && shape.isPointInFill(pt)) {
+        onDark = true
+        break
+      }
+    } catch {
+      /* some shapes throw */
+    }
+    // Fallback: axis-aligned bbox containment (title bars are usually rects).
+    try {
+      const sb = shape.getBBox()
+      if (cx >= sb.x && cx <= sb.x + sb.width && cy >= sb.y && cy <= sb.y + sb.height) {
+        onDark = true
+        break
+      }
+    } catch {
+      /* */
+    }
+  }
+  return onDark ? light : dark
+}
+
