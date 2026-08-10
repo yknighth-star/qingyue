@@ -12,10 +12,10 @@ const THEMES = {
 }
 
 function themeCss(bg, fg) {
-  const textSel = ['p', 'div', 'span', 'a']
+  const textSel = ['p', 'div', 'span', 'a', 'figcaption', 'caption', 'cite']
     .flatMap((t) => [`html body ${t}`, `html body ${t}[class]`, `html body ${t}[style]`])
     .join(',\n')
-  const fillSel = ['p', 'div']
+  const fillSel = ['p', 'div', 'figcaption']
     .flatMap((t) => [`html body ${t}`, `html body ${t}[class]`, `html body ${t}[style]`])
     .join(',\n')
   return `
@@ -31,8 +31,15 @@ ${textSel} {
 ${fillSel} {
   background-color: ${bg} !important;
 }
+html body figcaption,
+html body [class*="caption"] {
+  color: ${fg} !important;
+  -webkit-text-fill-color: ${fg} !important;
+  opacity: 1 !important;
+}
 html body :has(> img):not(body) {
   background-color: transparent !important;
+  color: ${fg} !important;
 }
 `.trim()
 }
@@ -49,6 +56,7 @@ const publisher = `
 body.kindle { background-color: #1a3a2a !important; color: #e8ffe8 !important; }
 p.calibre { color: #e8ffe8 !important; background-color: #1a3a2a !important; }
 div.main { background-color: #1a3a2a !important; color: #e8ffe8 !important; }
+figcaption.cap, p.caption { color: #999999 !important; opacity: 0.55 !important; }
 `
 
 const browser = await chromium.launch({ headless: true })
@@ -63,19 +71,29 @@ async function measure(themeName, cssBuilder) {
 <body class="kindle">
   <div class="main"><p class="calibre" id="t">hello</p></div>
   <div class="wrap"><img id="pic" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" width="20" height="20"/></div>
+  <figure><img width="20" height="20" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"/><figcaption class="cap" id="fc">图题</figcaption></figure>
+  <p class="caption" id="pc">图注灰字</p>
 </body></html>`)
   return page.evaluate(() => {
     const p = document.getElementById('t')
     const wrap = document.querySelector('.wrap')
+    const fc = document.getElementById('fc')
+    const pc = document.getElementById('pc')
     const pcs = getComputedStyle(p)
     const bcs = getComputedStyle(document.body)
     const wcs = getComputedStyle(wrap)
+    const fcs = getComputedStyle(fc)
+    const pccs = getComputedStyle(pc)
     return {
       bodyBg: bcs.backgroundColor,
       bodyFg: bcs.color,
       pBg: pcs.backgroundColor,
       pFg: pcs.color,
       wrapBg: wcs.backgroundColor,
+      figFg: fcs.color,
+      figOpacity: fcs.opacity,
+      capFg: pccs.color,
+      capOpacity: pccs.opacity,
     }
   })
 }
@@ -103,13 +121,20 @@ if (approx(whereSepia.pFg, THEMES.sepia.fg)) {
 for (const name of Object.keys(THEMES)) {
   const m = await measure(name, themeCss)
   const { bg, fg } = THEMES[name]
-  const ok = approx(m.bodyBg, bg) && approx(m.pBg, bg) && approx(m.pFg, fg)
+  const ok =
+    approx(m.bodyBg, bg) &&
+    approx(m.pBg, bg) &&
+    approx(m.pFg, fg) &&
+    approx(m.figFg, fg) &&
+    approx(m.capFg, fg) &&
+    Number(m.figOpacity) >= 0.99 &&
+    Number(m.capOpacity) >= 0.99
   // Img sits above wrapper fill — theme bg on wrap is acceptable (must not hide bitmap).
   if (!ok) {
     console.error(`FAIL ${name}`, m, { expectBg: bg, expectFg: fg })
     failed = true
   } else {
-    console.log(`PASS ${name} beats publisher .calibre (bg=${m.pBg}, fg=${m.pFg})`)
+    console.log(`PASS ${name} beats publisher .calibre + gray captions (bg=${m.pBg}, fg=${m.pFg})`)
   }
 }
 
