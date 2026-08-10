@@ -201,6 +201,78 @@ export function isDarkPaint(paint: string | null | undefined, currentColorCss?: 
   return isDarkDecorativeBackground(paint)
 }
 
+export type DomRectLike = { left: number; top: number; right: number; bottom: number; width: number; height: number }
+
+export function rectsOverlap(a: DomRectLike, b: DomRectLike, minCoverage = 0.35): boolean {
+  const x = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left))
+  const y = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top))
+  const overlap = x * y
+  if (overlap <= 0) return false
+  const base = Math.max(1, Math.min(a.width * a.height, b.width * b.height))
+  return overlap / base >= minCoverage
+}
+
+/** True when two CSS colors are perceptually close (theme-fg vs path fill). */
+export function colorsClose(a: string, b: string, maxChannelDelta = 28): boolean {
+  const pa = parseCssColor(a)
+  const pb = parseCssColor(b)
+  if (!pa || !pb) return false
+  return (
+    Math.abs(pa.r - pb.r) <= maxChannelDelta &&
+    Math.abs(pa.g - pb.g) <= maxChannelDelta &&
+    Math.abs(pa.b - pb.b) <= maxChannelDelta
+  )
+}
+
+function shapeFillPaint(shape: Element): string | null {
+  const fillAttr = shape.getAttribute('fill')
+  let fillCs: string | null = null
+  try {
+    fillCs = shape.ownerDocument.defaultView?.getComputedStyle(shape as Element).fill ?? null
+  } catch {
+    fillCs = null
+  }
+  const paint = parsePaintColor(fillAttr) || parsePaintColor(fillCs || undefined)
+  if (!paint || paint === 'none') return null
+  return paint
+}
+
+/**
+ * Point (svg user units) sits on a dark filled shape other than `exclude`.
+ * Title capsules are usually rect/path; bbox fallback covers rx pills.
+ */
+export function svgPointOnDarkShape(
+  svg: SVGSVGElement,
+  cx: number,
+  cy: number,
+  currentColor: string,
+  exclude?: Element | null,
+): boolean {
+  const shapes = svg.querySelectorAll('rect, path, circle, ellipse, polygon, polyline')
+  for (const shape of shapes) {
+    if (exclude && shape === exclude) continue
+    if (!(shape instanceof SVGGeometryElement)) continue
+    const paint = shapeFillPaint(shape)
+    if (!paint) continue
+    if (!isDarkPaint(paint, currentColor)) continue
+    try {
+      const pt = svg.createSVGPoint()
+      pt.x = cx
+      pt.y = cy
+      if (typeof shape.isPointInFill === 'function' && shape.isPointInFill(pt)) return true
+    } catch {
+      /* */
+    }
+    try {
+      const sb = shape.getBBox()
+      if (cx >= sb.x && cx <= sb.x + sb.width && cy >= sb.y && cy <= sb.y + sb.height) return true
+    } catch {
+      /* */
+    }
+  }
+  return false
+}
+
 /**
  * Decide fill for an SVG <text>: light when its anchor sits on a dark shape,
  * otherwise theme foreground (for labels on white diagram areas).
@@ -225,43 +297,134 @@ export function resolveSvgTextFill(opts: {
     return dark
   }
 
-  const shapes = svg.querySelectorAll('rect, path, circle, ellipse, polygon, polyline')
-  let onDark = false
-  for (const shape of shapes) {
-    if (!(shape instanceof SVGGeometryElement)) continue
-    const fillAttr = shape.getAttribute('fill')
-    const fillCs = (() => {
-      try {
-        return shape.ownerDocument.defaultView?.getComputedStyle(shape).fill
-      } catch {
-        return null
-      }
-    })()
-    const paint = parsePaintColor(fillAttr) || parsePaintColor(fillCs || undefined)
-    if (!paint || paint === 'none') continue
-    if (!isDarkPaint(paint, currentColor)) continue
-    try {
-      const pt = svg.createSVGPoint()
-      pt.x = cx
-      pt.y = cy
-      if (typeof shape.isPointInFill === 'function' && shape.isPointInFill(pt)) {
-        onDark = true
-        break
-      }
-    } catch {
-      /* some shapes throw */
-    }
-    // Fallback: axis-aligned bbox containment (title bars are usually rects).
-    try {
-      const sb = shape.getBBox()
-      if (cx >= sb.x && cx <= sb.x + sb.width && cy >= sb.y && cy <= sb.y + sb.height) {
-        onDark = true
-        break
-      }
-    } catch {
-      /* */
-    }
+  return svgPointOnDarkShape(svg, cx, cy, currentColor, textEl) ? light : dark
+}
+
+/**
+ * Illustrator/CN EPUB diagrams often draw titles as <path> glyphs with
+ * fill=currentColor / theme fg — not <text>. Lighten only theme-driven dark
+ * fills that sit on a *different* dark backdrop (leave the black bar itself).
+ */
+export function shouldLightenSvgGlyphShape(opts: {
+  shape: SVGGeometryElement
+  light: string
+  dark: string
+  currentColor: string
+  themeFg: string
+}): string | null {
+  const { shape, light, currentColor, themeFg } = opts
+  const svg = shape.ownerSVGElement
+  if (!svg) return null
+
+  const fillAttr = shape.getAttribute('fill')
+  let fillCs: string | null = null
+  try {
+    fillCs = shape.ownerDocument.defaultView?.getComputedStyle(shape).fill ?? null
+  } catch {
+    fillCs = null
   }
-  return onDark ? light : dark
+  const raw = parsePaintColor(fillAttr) || parsePaintColor(fillCs || undefined)
+  if (!raw || raw === 'none') return null
+
+  // Black decorative bars use solid #000 — do not invert them.
+  // Glyphs use currentColor or a fill ≈ theme foreground.
+  const themeDriven =
+    raw === 'currentColor' ||
+    colorsClose(raw === 'currentColor' ? currentColor : raw, themeFg) ||
+    colorsClose(raw === 'currentColor' ? currentColor : raw, currentColor)
+  if (!themeDriven) return null
+  if (!isDarkPaint(raw, currentColor) && !isDarkDecorativeBackground(currentColor)) return null
+
+  let cx = 0
+  let cy = 0
+  let bw = 0
+  let bh = 0
+  try {
+    const b = shape.getBBox()
+    cx = b.x + b.width / 2
+    cy = b.y + b.height / 2
+    bw = b.width
+    bh = b.height
+  } catch {
+    return null
+  }
+  // Skip huge backdrop shapes (the black capsule itself if somehow theme-colored).
+  try {
+    const vb = svg.viewBox?.baseVal
+    const sw = vb && vb.width ? vb.width : svg.getBBox().width
+    if (sw > 0 && bw * bh > sw * sw * 0.12) return null
+  } catch {
+    /* */
+  }
+
+  if (!svgPointOnDarkShape(svg, cx, cy, currentColor, shape)) return null
+  return light
+}
+
+/**
+ * HTML title sitting on a sibling/absolute dark pill (common CN EPUB pattern):
+ *   <div style="position:relative">
+ *     <div style="position:absolute;background:#000"></div>
+ *     <p>朱重八家族</p>
+ *   </div>
+ * Own background is transparent → older wash kept theme-dark text.
+ */
+export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boolean {
+  const rect = el.getBoundingClientRect()
+  if (rect.width < 1 || rect.height < 1) return false
+
+  const cx = rect.left + rect.width / 2
+  const cy = rect.top + rect.height / 2
+
+  let node: HTMLElement | null = el
+  for (let depth = 0; depth < 8 && node; depth++) {
+    const parent = node.parentElement
+    if (!parent || parent === el.ownerDocument.body) break
+
+    for (const sib of Array.from(parent.children)) {
+      if (!(sib instanceof HTMLElement) || sib === node) continue
+      const tag = sib.tagName.toLowerCase()
+      if (tag === 'script' || tag === 'style' || tag === 'br') continue
+
+      // SVG sibling: hit-test dark shapes in svg user space via screen bbox of svg.
+      if (tag === 'svg' && sib instanceof SVGSVGElement) {
+        const sr = sib.getBoundingClientRect()
+        if (!rectsOverlap(rect, sr, 0.15)) continue
+        // Map title center into svg client coords roughly via bounding box ratio.
+        try {
+          const vb = sib.viewBox?.baseVal
+          const sb = vb && vb.width ? vb : null
+          let ux = cx - sr.left
+          let uy = cy - sr.top
+          if (sb && sr.width > 0 && sr.height > 0) {
+            ux = sb.x + ((cx - sr.left) / sr.width) * sb.width
+            uy = sb.y + ((cy - sr.top) / sr.height) * sb.height
+          }
+          if (svgPointOnDarkShape(sib, ux, uy, win.getComputedStyle(el.ownerDocument.body).color || '#000')) {
+            return true
+          }
+        } catch {
+          /* */
+        }
+        continue
+      }
+
+      let cs: CSSStyleDeclaration
+      try {
+        cs = win.getComputedStyle(sib)
+      } catch {
+        continue
+      }
+      const surface = resolveSurfaceBackgroundCss(sib, cs, win)
+      if (!isDarkSurfaceCss(surface)) continue
+      const sr = sib.getBoundingClientRect()
+      if (sr.width < 1 || sr.height < 1) continue
+      // Center of title over dark layer is enough (pill often wider than text).
+      if (cx >= sr.left && cx <= sr.right && cy >= sr.top && cy <= sr.bottom) return true
+      if (rectsOverlap(rect, sr, 0.4)) return true
+    }
+    node = parent
+  }
+  return false
 }
 

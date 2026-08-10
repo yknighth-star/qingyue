@@ -3,12 +3,14 @@ import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit
 import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH, THEME_VARS } from '@/utils/format'
 import {
   contrastTextForBackground,
+  elementOverlapsDarkBackdrop,
   isDarkDecorativeBackground,
   isDarkSurfaceCss,
   isFigureTitleLike,
   isTransparentCssColor,
   resolveSurfaceBackgroundCss,
   resolveSvgTextFill,
+  shouldLightenSvgGlyphShape,
 } from '@/utils/colorContrast'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
@@ -1739,6 +1741,15 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         applyText(el, inheritedFg === fg ? lightOnDark : inheritedFg, true)
         nextDark = true
         nextFg = lightOnDark
+      } else if (
+        // Transparent title over sibling absolute black pill / SVG capsule.
+        // Limit to short title-like strings so body copy is not inverted.
+        elementOverlapsDarkBackdrop(el, win) &&
+        ((el.textContent || '').replace(/\s+/g, '').trim().length <= 24 || titleLike)
+      ) {
+        nextFg = lightOnDark
+        nextDark = true
+        applyText(el, lightOnDark, true)
       } else if (titleLike) {
         const inline = el.getAttribute('style') || ''
         const looksBlack =
@@ -1769,8 +1780,10 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
   }
 
   /**
-   * Fix SVG <text>/<tspan> contrast. Body theme color becomes currentColor fill,
-   * turning white-on-black bars (e.g. 「朱重八家族」) into dark-on-black.
+   * Fix SVG title contrast on black capsules.
+   * - <text> fill=currentColor → theme fg makes dark-on-black
+   * - CN diagrams often draw titles as <path> glyphs (not <text>) with the same bug
+   * - Raise text paint order so a later black rect cannot cover glyphs
    */
   private paintSvgTextContrast(doc: Document, light: string, dark: string) {
     const win = doc.defaultView
@@ -1783,6 +1796,17 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
 
     doc.querySelectorAll('svg').forEach((svg) => {
       if (!(svg instanceof SVGSVGElement)) return
+
+      // Paint order: later nodes win. Move titles above decorative bars.
+      const texts = Array.from(svg.querySelectorAll('text'))
+      for (const node of texts) {
+        try {
+          svg.appendChild(node)
+        } catch {
+          /* */
+        }
+      }
+
       svg.querySelectorAll('text').forEach((node) => {
         if (!(node instanceof SVGTextElement)) return
         const fill = resolveSvgTextFill({
@@ -1800,6 +1824,30 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
           }
         })
       })
+
+      // Path/polygon "glyphs" on dark bars (Illustrator / Kindle CN exports).
+      const glyphPaths: SVGGeometryElement[] = []
+      svg.querySelectorAll('path, polygon').forEach((node) => {
+        if (!(node instanceof SVGGeometryElement)) return
+        const fill = shouldLightenSvgGlyphShape({
+          shape: node,
+          light,
+          dark,
+          currentColor,
+          themeFg: dark,
+        })
+        if (!fill) return
+        node.style.setProperty('fill', fill, 'important')
+        glyphPaths.push(node)
+      })
+      // Keep lightened glyphs above the black capsule.
+      for (const node of glyphPaths) {
+        try {
+          svg.appendChild(node)
+        } catch {
+          /* */
+        }
+      }
     })
   }
 
