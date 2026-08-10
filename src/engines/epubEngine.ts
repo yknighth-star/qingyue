@@ -4,7 +4,10 @@ import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH, THEME_VARS } fro
 import {
   contrastTextForBackground,
   isDarkDecorativeBackground,
+  isDarkSurfaceCss,
+  isFigureTitleLike,
   isTransparentCssColor,
+  resolveSurfaceBackgroundCss,
 } from '@/utils/colorContrast'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
@@ -1501,6 +1504,7 @@ html body h6 {
       this.pinThemeStyleLast(doc, styleEl)
 
       const scheme = theme === 'dark' ? 'dark' : 'light'
+      const lightOnDark = contrastTextForBackground('#000000', fg, bg) || '#f4f1ea'
       // Match typography specificity: publisher Kindle CSS uses .class !important.
       // :where() has zero specificity and loses — that made only near-green washes
       // look "correct" while sepia/light/dark never stuck on mobile.
@@ -1571,9 +1575,16 @@ ${textSel} {
   color: ${fg} !important;
   -webkit-text-fill-color: ${fg} !important;
 }
-/* Caption opacity only — text color comes from contrast wash (dark pills → light glyphs). */
-${captionSel} {
+/* Caption opacity + dark-bar light text (wash also sets inline; this catches late CSS). */
+${captionSel},
+html body [data-qy-on-dark='1'],
+html body [data-qy-on-dark='1'] * {
   opacity: 1 !important;
+}
+html body [data-qy-on-dark='1'],
+html body [data-qy-on-dark='1'] * {
+  color: ${lightOnDark} !important;
+  -webkit-text-fill-color: ${lightOnDark} !important;
 }
 html body img,
 html body img[class],
@@ -1621,11 +1632,17 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
   /**
    * Override publisher color washes with theme colors, but keep dark decorative
    * surfaces (black figure-title pills) and put light text on them for contrast.
+   *
+   * Critical mobile case: theme forces dark fg on everything; black bars like
+   * 「赈灾物品」become dark-on-black unless we detect the surface (solid /
+   * gradient / bgcolor / ::before) and force light glyphs.
    */
   private paintPublisherWashes(doc: Document, bg: string, fg: string) {
     const win = doc.defaultView
     const body = doc.body
     if (!win || !body) return
+
+    const lightOnDark = contrastTextForBackground('#000000', fg, bg) || '#f4f1ea'
 
     const isMedia = (tag: string) =>
       tag === 'img' ||
@@ -1640,23 +1657,23 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       tag === 'style' ||
       tag === 'link'
 
-    const hasUrlBackground = (el: HTMLElement, cs: CSSStyleDeclaration) => {
+    const hasUrlIllustration = (el: HTMLElement, cs: CSSStyleDeclaration) => {
       const inline = el.getAttribute('style') || ''
       if (/background(-image)?\s*:[^;]*url\(/i.test(inline)) return true
       const bi = cs.backgroundImage
-      return !!bi && bi !== 'none' && /url\(/i.test(bi)
+      return !!bi && bi !== 'none' && /url\(/i.test(bi) && !/gradient\(/i.test(bi)
     }
 
-    const applyText = (el: HTMLElement, color: string) => {
+    const applyText = (el: HTMLElement, color: string, onDark: boolean) => {
       el.style.setProperty('color', color, 'important')
       el.style.setProperty('-webkit-text-fill-color', color, 'important')
-      if (/caption|fuming|img-title|image-title|pic-title|tu-ti/i.test(el.className || '')) {
-        el.style.setProperty('opacity', '1', 'important')
-      }
+      el.style.setProperty('opacity', '1', 'important')
+      if (onDark) el.dataset.qyOnDark = '1'
+      else delete el.dataset.qyOnDark
     }
 
-    const walk = (el: HTMLElement, depth: number, inheritedFg: string) => {
-      if (depth > 8) return
+    const walk = (el: HTMLElement, depth: number, inheritedFg: string, underDark: boolean) => {
+      if (depth > 14) return
       const tag = el.tagName.toLowerCase()
       if (isMedia(tag)) return
       if (el.id === 'qingyue-theme' || el.id === 'qingyue-typography' || el.id === 'qingyue-media-fit') return
@@ -1669,46 +1686,82 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       }
 
       const kids = Array.from(el.children).filter((n) => n instanceof HTMLElement) as HTMLElement[]
-      const urlBg = hasUrlBackground(el, cs)
+      const urlIllust = hasUrlIllustration(el, cs)
       const mediaOnly =
         kids.length > 0 &&
         kids.every((k) => isMedia(k.tagName.toLowerCase()) || k.tagName.toLowerCase() === 'br')
+      const titleLike = isFigureTitleLike(el)
+      const surface = resolveSurfaceBackgroundCss(el, cs, win)
+      const darkSurface = isDarkSurfaceCss(surface)
 
       let nextFg = inheritedFg
+      let nextDark = underDark
 
-      if (urlBg || mediaOnly) {
-        // Keep illustrations; still force readable text for sibling captions under the wrap.
-        applyText(el, inheritedFg)
+      if (urlIllust || mediaOnly) {
+        // Keep bitmap illustrations; still force light text on dark title wrappers.
+        if (darkSurface) {
+          const light = contrastTextForBackground(surface!, fg, bg) || lightOnDark
+          nextFg = light
+          nextDark = true
+          applyText(el, light, true)
+        } else if (underDark || titleLike) {
+          nextFg = underDark ? inheritedFg === fg ? lightOnDark : inheritedFg : inheritedFg
+          if (underDark) {
+            nextDark = true
+            applyText(el, nextFg, true)
+          } else {
+            applyText(el, inheritedFg, false)
+          }
+        } else {
+          applyText(el, inheritedFg, false)
+        }
         for (const child of kids) {
           if (!isMedia(child.tagName.toLowerCase()) && child.tagName.toLowerCase() !== 'br') {
-            walk(child, depth + 1, nextFg)
+            walk(child, depth + 1, nextFg, nextDark)
           }
         }
         return
       }
 
-      const surfaceBg = cs.backgroundColor
-      if (!isTransparentCssColor(surfaceBg)) {
-        if (isDarkDecorativeBackground(surfaceBg)) {
-          // Black/dark caption bars: keep fill, switch to light glyphs.
-          const light = contrastTextForBackground(surfaceBg, fg, bg) || '#f4f1ea'
+      if (surface && !isTransparentCssColor(surface)) {
+        if (isDarkDecorativeBackground(surface) || darkSurface) {
+          const light = contrastTextForBackground(surface, fg, bg) || lightOnDark
           nextFg = light
-          applyText(el, light)
+          nextDark = true
+          applyText(el, light, true)
+          // Keep publisher dark fill (don't wash to page bg).
         } else {
-          // Light / tinted publisher washes → theme page color + theme text.
           el.style.setProperty('background-color', bg, 'important')
           nextFg = fg
-          applyText(el, fg)
+          nextDark = false
+          applyText(el, fg, false)
+        }
+      } else if (titleLike && underDark) {
+        applyText(el, inheritedFg === fg ? lightOnDark : inheritedFg, true)
+        nextDark = true
+        nextFg = lightOnDark
+      } else if (titleLike) {
+        // Title-like with transparent computed bg: still check inline black styles / bgcolor.
+        const inline = el.getAttribute('style') || ''
+        const looksBlack =
+          /background(-color)?\s*:\s*(#0{3,8}|black|rgb\(\s*0\s*,\s*0\s*,\s*0)/i.test(inline) ||
+          /^(#0{3,8}|black)$/i.test(el.getAttribute('bgcolor') || '')
+        if (looksBlack) {
+          nextFg = lightOnDark
+          nextDark = true
+          applyText(el, lightOnDark, true)
+        } else {
+          applyText(el, inheritedFg, underDark)
         }
       } else {
-        applyText(el, inheritedFg)
+        applyText(el, inheritedFg, underDark)
       }
 
-      for (const child of kids) walk(child, depth + 1, nextFg)
+      for (const child of kids) walk(child, depth + 1, nextFg, nextDark)
     }
 
     for (const child of Array.from(body.children)) {
-      if (child instanceof HTMLElement) walk(child, 0, fg)
+      if (child instanceof HTMLElement) walk(child, 0, fg, false)
     }
   }
 

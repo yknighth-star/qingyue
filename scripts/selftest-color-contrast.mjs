@@ -4,8 +4,10 @@
  * or: npx tsx scripts/selftest-color-contrast.mjs
  */
 import {
+  colorsFromBackgroundImage,
   contrastTextForBackground,
   isDarkDecorativeBackground,
+  isFigureTitleLike,
   parseCssColor,
   relativeLuminance,
 } from '../src/utils/colorContrast.ts'
@@ -36,8 +38,16 @@ assert(onLight === '#3b2f2f', `light surface → theme fg (got ${onLight})`)
 const onTransparent = contrastTextForBackground('rgba(0, 0, 0, 0)', '#3b2f2f', '#f3ead3')
 assert(onTransparent === null, 'transparent → inherit')
 
+const grad = colorsFromBackgroundImage('linear-gradient(to bottom, #000000, #222222)')
+assert(grad.length >= 2, `gradient stops extracted (got ${grad.join(',')})`)
+assert(grad.some((c) => isDarkDecorativeBackground(c)), 'gradient has dark stop')
+
+assert(!colorsFromBackgroundImage('url("cover.png")').length, 'plain url() ignored')
+
 if (failed) {
   console.error('SELFTEST FAILED')
   process.exit(1)
 }
 console.log('SELFTEST OK')
+void isFigureTitleLike
+

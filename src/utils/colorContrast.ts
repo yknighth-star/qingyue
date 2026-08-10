@@ -89,3 +89,93 @@ export function isDarkDecorativeBackground(backgroundCss: string): boolean {
   if (!rgb) return false
   return relativeLuminance(rgb.r, rgb.g, rgb.b) < 0.42
 }
+
+const TITLE_CLASS_RE =
+  /caption|fuming|img-title|image-title|pic-title|tu-ti|title|biaoti|btitle|chapter-title|kindle-cn/i
+
+/** Figure/section title bars that commonly sit on black pills in CN EPUBs. */
+export function isFigureTitleLike(el: Element): boolean {
+  const tag = el.tagName.toLowerCase()
+  if (tag === 'figcaption' || tag === 'caption' || tag === 'cite') return true
+  const cls = (el instanceof HTMLElement ? el.className : '') || ''
+  if (typeof cls === 'string' && TITLE_CLASS_RE.test(cls)) return true
+  const id = el.id || ''
+  if (TITLE_CLASS_RE.test(id)) return true
+  // Short centered heading-like blocks (e.g. 「赈灾物品」)
+  if (el instanceof HTMLElement) {
+    const align = (el.getAttribute('align') || el.style.textAlign || '').toLowerCase()
+    const text = (el.textContent || '').replace(/\s+/g, '').trim()
+    if (text.length > 0 && text.length <= 24 && /center/i.test(align)) return true
+  }
+  return false
+}
+
+/**
+ * Pull color tokens out of background-image (gradients / solid images as css colors).
+ * Ignores url(...) illustration backgrounds.
+ */
+export function colorsFromBackgroundImage(backgroundImage: string): string[] {
+  const bi = (backgroundImage || '').trim()
+  if (!bi || bi === 'none') return []
+  if (/url\(/i.test(bi) && !/gradient\(/i.test(bi)) return []
+  const out: string[] = []
+  const hexRe = /#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})\b/gi
+  const rgbRe = /rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+(?:\s*,\s*[\d.%]+)?\s*\)/gi
+  for (const m of bi.match(hexRe) || []) out.push(m)
+  for (const m of bi.match(rgbRe) || []) out.push(m)
+  return out
+}
+
+/**
+ * Effective surface color for contrast decisions.
+ * Prefers opaque background-color; falls back to dark gradient stops / bgcolor attr /
+ * ::before/::after solid fills (common CN EPUB title bars).
+ */
+export function resolveSurfaceBackgroundCss(
+  el: HTMLElement,
+  cs: CSSStyleDeclaration,
+  win?: Window | null,
+): string | null {
+  const solid = cs.backgroundColor
+  if (!isTransparentCssColor(solid)) return solid
+
+  const attr = el.getAttribute('bgcolor')
+  if (attr) {
+    const parsed = parseCssColor(attr.startsWith('#') ? attr : `#${attr}`)
+    if (parsed) return `rgb(${parsed.r}, ${parsed.g}, ${parsed.b})`
+    const asCss = parseCssColor(attr)
+    if (asCss) return `rgb(${asCss.r}, ${asCss.g}, ${asCss.b})`
+  }
+
+  const fromGrad = colorsFromBackgroundImage(cs.backgroundImage)
+  for (const c of fromGrad) {
+    if (isDarkDecorativeBackground(c)) return c
+  }
+  // Any opaque gradient stop counts as a surface hint.
+  for (const c of fromGrad) {
+    if (!isTransparentCssColor(c)) return c
+  }
+
+  if (win) {
+    for (const pseudo of ['::before', '::after'] as const) {
+      try {
+        const pcs = win.getComputedStyle(el, pseudo)
+        if (!pcs || pcs.content === 'none' || pcs.content === 'normal') continue
+        const pbg = pcs.backgroundColor
+        if (!isTransparentCssColor(pbg)) return pbg
+        for (const c of colorsFromBackgroundImage(pcs.backgroundImage)) {
+          if (isDarkDecorativeBackground(c)) return c
+        }
+      } catch {
+        /* */
+      }
+    }
+  }
+
+  return null
+}
+
+export function isDarkSurfaceCss(surfaceCss: string | null): boolean {
+  if (!surfaceCss) return false
+  return isDarkDecorativeBackground(surfaceCss)
+}
