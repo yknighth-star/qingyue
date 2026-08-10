@@ -59,6 +59,12 @@ export function isTransparentCssColor(color: string): boolean {
 }
 
 /**
+ * Pure white on dark caption bars. themeBg (sepia/green) is too close to some
+ * publisher dark greys and still fails on PC after theme re-inject.
+ */
+export const LIGHT_ON_DARK_FG = '#ffffff'
+
+/**
  * Pick readable text on a solid surface.
  * Dark decorative bars (figure titles) keep light glyphs; light surfaces use theme fg.
  * Returns null when surface is transparent — caller should inherit.
@@ -66,20 +72,94 @@ export function isTransparentCssColor(color: string): boolean {
 export function contrastTextForBackground(
   backgroundCss: string,
   themeFg: string,
-  themeBg: string,
+  _themeBg: string,
 ): string | null {
   if (isTransparentCssColor(backgroundCss)) return null
   const rgb = parseCssColor(backgroundCss)
   if (!rgb) return themeFg
   const L = relativeLuminance(rgb.r, rgb.g, rgb.b)
-  // Dark pill / caption bars (e.g. 明朝那些事儿 figure titles)
-  if (L < 0.42) {
-    const bgRgb = parseCssColor(themeBg)
-    const bgL = bgRgb ? relativeLuminance(bgRgb.r, bgRgb.g, bgRgb.b) : 1
-    // On light reader themes, themeBg is a readable off-white on black.
-    return bgL > 0.55 ? themeBg : '#f4f1ea'
-  }
+  // Dark pill / caption bars — always max-contrast white (not cream themeBg).
+  if (L < 0.42) return LIGHT_ON_DARK_FG
   return themeFg
+}
+
+export type SvgBand = { x: number; y: number; width: number; height: number }
+
+/**
+ * Wide dark shapes in the upper band of an SVG (title capsules like 「朱重八家族」).
+ * More reliable than isPointInFill when PC layout/getBBox is still settling.
+ * Also treats <image> strips (CN EPUB often embeds the black pill as a bitmap).
+ */
+export function collectSvgTitleBands(
+  svg: SVGSVGElement,
+  currentColor: string,
+): SvgBand[] {
+  let sw = 0
+  let sh = 0
+  try {
+    const vb = svg.viewBox?.baseVal
+    if (vb && vb.width > 0) {
+      sw = vb.width
+      sh = vb.height
+    } else {
+      const b = svg.getBBox()
+      sw = b.width
+      sh = b.height
+    }
+  } catch {
+    return []
+  }
+  if (sw < 8 || sh < 8) return []
+
+  const bands: SvgBand[] = []
+  const pushIfTitleBand = (b: { x: number; y: number; width: number; height: number }) => {
+    if (b.width < sw * 0.35) return
+    if (b.height > sh * 0.45) return
+    if (b.y + b.height / 2 > sh * 0.42) return
+    bands.push({ x: b.x, y: b.y, width: b.width, height: b.height })
+  }
+
+  const shapes = svg.querySelectorAll('rect, path, ellipse, polygon')
+  for (const shape of shapes) {
+    if (!(shape instanceof SVGGeometryElement)) continue
+    const paint = shapeFillPaint(shape)
+    if (!paint || !isDarkPaint(paint, currentColor)) continue
+    try {
+      pushIfTitleBand(shape.getBBox())
+    } catch {
+      /* */
+    }
+  }
+
+  // Bitmap title pills inside SVG
+  svg.querySelectorAll('image').forEach((img) => {
+    try {
+      pushIfTitleBand(img.getBBox())
+    } catch {
+      /* */
+    }
+  })
+
+  return bands
+}
+
+export function pointInSvgBands(cx: number, cy: number, bands: SvgBand[]): boolean {
+  for (const b of bands) {
+    if (cx >= b.x && cx <= b.x + b.width && cy >= b.y && cy <= b.y + b.height) return true
+  }
+  return false
+}
+
+/** Figure-title chrome: skip chapter titleReset (position:static kills overlay captions). */
+export function isFigureTitleChrome(el: Element): boolean {
+  if (isFigureTitleLike(el)) return true
+  if (el.closest?.('figure, figcaption')) return true
+  const parent = el.parentElement
+  if (parent?.querySelector(':scope > img, :scope > svg, :scope > picture, :scope > object')) {
+    const text = (el.textContent || '').replace(/\s+/g, '').trim()
+    if (text.length > 0 && text.length <= 32) return true
+  }
+  return false
 }
 
 /** True when a solid background is dark enough to keep (decorative), not wash away. */
@@ -282,8 +362,9 @@ export function resolveSvgTextFill(opts: {
   light: string
   dark: string
   currentColor: string
+  titleBands?: SvgBand[]
 }): string {
-  const { textEl, light, dark, currentColor } = opts
+  const { textEl, light, dark, currentColor, titleBands } = opts
   const svg = textEl.ownerSVGElement
   if (!svg) return dark
 
@@ -291,12 +372,22 @@ export function resolveSvgTextFill(opts: {
   let cy = 0
   try {
     const b = textEl.getBBox()
-    cx = b.x + b.width / 2
-    cy = b.y + b.height / 2
+    // Unlaid-out text on PC often reports empty bbox — fall back to x/y attrs.
+    if (b.width < 0.5 && b.height < 0.5) {
+      const x = Number(textEl.getAttribute('x') || 0)
+      const y = Number(textEl.getAttribute('y') || 0)
+      cx = x
+      cy = y
+    } else {
+      cx = b.x + b.width / 2
+      cy = b.y + b.height / 2
+    }
   } catch {
-    return dark
+    cx = Number(textEl.getAttribute('x') || 0)
+    cy = Number(textEl.getAttribute('y') || 0)
   }
 
+  if (titleBands?.length && pointInSvgBands(cx, cy, titleBands)) return light
   return svgPointOnDarkShape(svg, cx, cy, currentColor, textEl) ? light : dark
 }
 
@@ -311,8 +402,9 @@ export function shouldLightenSvgGlyphShape(opts: {
   dark: string
   currentColor: string
   themeFg: string
+  titleBands?: SvgBand[]
 }): string | null {
-  const { shape, light, currentColor, themeFg } = opts
+  const { shape, light, currentColor, themeFg, titleBands } = opts
   const svg = shape.ownerSVGElement
   if (!svg) return null
 
@@ -357,6 +449,7 @@ export function shouldLightenSvgGlyphShape(opts: {
     /* */
   }
 
+  if (titleBands?.length && pointInSvgBands(cx, cy, titleBands)) return light
   if (!svgPointOnDarkShape(svg, cx, cy, currentColor, shape)) return null
   return light
 }
@@ -368,6 +461,7 @@ export function shouldLightenSvgGlyphShape(opts: {
  *     <p>朱重八家族</p>
  *   </div>
  * Own background is transparent → older wash kept theme-dark text.
+ * Also: title over a sibling <img> black bar (sample pixels when possible).
  */
 export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boolean {
   const rect = el.getBoundingClientRect()
@@ -375,6 +469,28 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
 
   const cx = rect.left + rect.width / 2
   const cy = rect.top + rect.height / 2
+
+  const imgDarkAt = (img: HTMLImageElement): boolean => {
+    try {
+      const r = img.getBoundingClientRect()
+      if (r.width < 1 || r.height < 1 || !img.naturalWidth) {
+        // Overlapping an image with a short label — treat as dark bar candidate.
+        return true
+      }
+      const canvas = el.ownerDocument.createElement('canvas')
+      canvas.width = 1
+      canvas.height = 1
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return true
+      const nx = ((cx - r.left) / r.width) * img.naturalWidth
+      const ny = ((cy - r.top) / r.height) * img.naturalHeight
+      ctx.drawImage(img, nx, ny, 1, 1, 0, 0, 1, 1)
+      const d = ctx.getImageData(0, 0, 1, 1).data
+      return relativeLuminance(d[0], d[1], d[2]) < 0.42
+    } catch {
+      return true
+    }
+  }
 
   let node: HTMLElement | null = el
   for (let depth = 0; depth < 8 && node; depth++) {
@@ -386,11 +502,20 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
       const tag = sib.tagName.toLowerCase()
       if (tag === 'script' || tag === 'style' || tag === 'br') continue
 
+      if (tag === 'img' && sib instanceof HTMLImageElement) {
+        const sr = sib.getBoundingClientRect()
+        if (cx >= sr.left && cx <= sr.right && cy >= sr.top && cy <= sr.bottom) {
+          if (imgDarkAt(sib)) return true
+        } else if (rectsOverlap(rect, sr, 0.35) && imgDarkAt(sib)) {
+          return true
+        }
+        continue
+      }
+
       // SVG sibling: hit-test dark shapes in svg user space via screen bbox of svg.
       if (tag === 'svg' && sib instanceof SVGSVGElement) {
         const sr = sib.getBoundingClientRect()
         if (!rectsOverlap(rect, sr, 0.15)) continue
-        // Map title center into svg client coords roughly via bounding box ratio.
         try {
           const vb = sib.viewBox?.baseVal
           const sb = vb && vb.width ? vb : null
@@ -400,6 +525,8 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
             ux = sb.x + ((cx - sr.left) / sr.width) * sb.width
             uy = sb.y + ((cy - sr.top) / sr.height) * sb.height
           }
+          const bands = collectSvgTitleBands(sib, win.getComputedStyle(el.ownerDocument.body).color || '#000')
+          if (pointInSvgBands(ux, uy, bands)) return true
           if (svgPointOnDarkShape(sib, ux, uy, win.getComputedStyle(el.ownerDocument.body).color || '#000')) {
             return true
           }
@@ -426,5 +553,159 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
     node = parent
   }
   return false
+}
+
+/**
+ * Final hard pass: short labels whose backdrop is dark (solid / url / img / svg)
+ * must be pure white. Does not rely on titleLike / class heuristics.
+ */
+export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): number {
+  const win = doc.defaultView
+  const body = doc.body
+  if (!win || !body) return 0
+
+  const WHITE = LIGHT_ON_DARK_FG
+  let fixed = 0
+
+  const force = (el: HTMLElement) => {
+    el.style.setProperty('color', WHITE, 'important')
+    el.style.setProperty('-webkit-text-fill-color', WHITE, 'important')
+    el.style.setProperty('opacity', '1', 'important')
+    el.dataset.qyOnDark = '1'
+    fixed++
+  }
+
+  const ownShortText = (el: HTMLElement): string => {
+    let own = ''
+    for (const n of Array.from(el.childNodes)) {
+      if (n.nodeType === 3) own += n.textContent || ''
+    }
+    own = own.replace(/\s+/g, '').trim()
+    if (own) return own
+    if (el.children.length === 0) return (el.textContent || '').replace(/\s+/g, '').trim()
+    return ''
+  }
+
+  const candidates = body.querySelectorAll(
+    'p, div, span, h1, h2, h3, h4, h5, h6, label, figcaption, caption, center, font, a, strong, em, b, li, td, th',
+  )
+
+  candidates.forEach((node) => {
+    if (!(node instanceof HTMLElement)) return
+    if (node.closest('svg')) return
+    const text = ownShortText(node)
+    if (!text || text.length > 24) return
+
+    let cs: CSSStyleDeclaration
+    try {
+      cs = win.getComputedStyle(node)
+    } catch {
+      return
+    }
+
+    const surface = resolveSurfaceBackgroundCss(node, cs, win)
+    if (isDarkSurfaceCss(surface)) {
+      force(node)
+      return
+    }
+
+    const bi = cs.backgroundImage
+    if (bi && bi !== 'none' && /url\(/i.test(bi) && !/gradient\(/i.test(bi)) {
+      force(node)
+      return
+    }
+
+    if (elementOverlapsDarkBackdrop(node, win)) {
+      force(node)
+      return
+    }
+
+    // Probe pixels behind the glyphs (catches absolute stacks / z-index overlays).
+    const rect = node.getBoundingClientRect()
+    if (rect.width < 1 || rect.height < 1) return
+    const cx = rect.left + rect.width / 2
+    const cy = rect.top + rect.height / 2
+    const prev = node.style.getPropertyValue('visibility')
+    const prevPri = node.style.getPropertyPriority('visibility')
+    node.style.setProperty('visibility', 'hidden', 'important')
+    let behind: Element | null = null
+    try {
+      behind = doc.elementFromPoint(cx, cy)
+    } catch {
+      behind = null
+    }
+    if (prev) node.style.setProperty('visibility', prev, prevPri || undefined)
+    else node.style.removeProperty('visibility')
+
+    let el: Element | null = behind
+    for (let i = 0; i < 6 && el; i++) {
+      if (el === node) {
+        el = el.parentElement
+        continue
+      }
+      if (el instanceof HTMLImageElement) {
+        try {
+          const r = el.getBoundingClientRect()
+          if (r.width >= 1 && el.naturalWidth) {
+            const canvas = doc.createElement('canvas')
+            canvas.width = 1
+            canvas.height = 1
+            const ctx = canvas.getContext('2d')
+            if (ctx) {
+              const nx = ((cx - r.left) / r.width) * el.naturalWidth
+              const ny = ((cy - r.top) / r.height) * el.naturalHeight
+              ctx.drawImage(el, nx, ny, 1, 1, 0, 0, 1, 1)
+              const d = ctx.getImageData(0, 0, 1, 1).data
+              if (relativeLuminance(d[0], d[1], d[2]) < 0.42) {
+                force(node)
+                return
+              }
+            }
+          } else {
+            force(node)
+            return
+          }
+        } catch {
+          force(node)
+          return
+        }
+      }
+      if (el instanceof SVGSVGElement || (el instanceof SVGElement && el.ownerSVGElement)) {
+        const svg = el instanceof SVGSVGElement ? el : el.ownerSVGElement!
+        const sr = svg.getBoundingClientRect()
+        const vb = svg.viewBox?.baseVal
+        let ux = cx - sr.left
+        let uy = cy - sr.top
+        if (vb && vb.width && sr.width > 0 && sr.height > 0) {
+          ux = vb.x + ((cx - sr.left) / sr.width) * vb.width
+          uy = vb.y + ((cy - sr.top) / sr.height) * vb.height
+        }
+        const bands = collectSvgTitleBands(svg, themeFg)
+        if (pointInSvgBands(ux, uy, bands) || svgPointOnDarkShape(svg, ux, uy, themeFg)) {
+          force(node)
+          return
+        }
+      }
+      if (el instanceof HTMLElement) {
+        try {
+          const s = resolveSurfaceBackgroundCss(el, win.getComputedStyle(el), win)
+          if (isDarkSurfaceCss(s)) {
+            force(node)
+            return
+          }
+          const ebi = win.getComputedStyle(el).backgroundImage
+          if (ebi && ebi !== 'none' && /url\(/i.test(ebi)) {
+            force(node)
+            return
+          }
+        } catch {
+          /* */
+        }
+      }
+      el = el.parentElement
+    }
+  })
+
+  return fixed
 }
 

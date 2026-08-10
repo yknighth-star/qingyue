@@ -22,7 +22,7 @@ function assert(cond, msg) {
   }
 }
 
-const light = contrastTextForBackground('#000', '#3b2f2f', '#f3ead3') || '#f3ead3'
+const light = contrastTextForBackground('#000', '#3b2f2f', '#f3ead3') || '#ffffff'
 const dark = '#3b2f2f'
 
 const browser = await chromium.launch({ headless: true })
@@ -85,7 +85,7 @@ try {
   }, { lightOnDark: light })
 
   assert(htmlWash.hit, 'HTML overlap detector marks title on dark pill')
-  assert(/243,\s*234,\s*211|f3ead3/i.test(htmlWash.color), `HTML title light after wash (got ${htmlWash.color})`)
+  assert(/255,\s*255,\s*255|#ffffff/i.test(htmlWash.color), `HTML title light after wash (got ${htmlWash.color})`)
 
   // --- Case B: path glyphs on black bar (the missed root cause) ---
   await page.setContent(`<!DOCTYPE html><html><body style="background:#f3ead3;color:#3b2f2f">
@@ -201,11 +201,11 @@ try {
     })
   }, { light, dark })
 
-  assert(/f3ead3|243,\s*234,\s*211/i.test(pathResult.fills.glyph1), `path glyph1 lightened (got ${pathResult.fills.glyph1})`)
-  assert(/f3ead3|243,\s*234,\s*211/i.test(pathResult.fills.glyph2), `path glyph2 lightened (got ${pathResult.fills.glyph2})`)
-  assert(/f3ead3|243,\s*234,\s*211/i.test(pathResult.fills.glyph3), `path glyph3 lightened (got ${pathResult.fills.glyph3})`)
+  assert(/ffffff|255,\s*255,\s*255/i.test(pathResult.fills.glyph1), `path glyph1 lightened (got ${pathResult.fills.glyph1})`)
+  assert(/ffffff|255,\s*255,\s*255/i.test(pathResult.fills.glyph2), `path glyph2 lightened (got ${pathResult.fills.glyph2})`)
+  assert(/ffffff|255,\s*255,\s*255/i.test(pathResult.fills.glyph3), `path glyph3 lightened (got ${pathResult.fills.glyph3})`)
   assert(
-    !pathResult.fills.labelPath || !/f3ead3|243,\s*234,\s*211/i.test(pathResult.fills.labelPath),
+    !pathResult.fills.labelPath || !/ffffff|255,\s*255,\s*255/i.test(pathResult.fills.labelPath),
     `label on white NOT lightened (got ${pathResult.fills.labelPath})`,
   )
   assert(
@@ -216,7 +216,7 @@ try {
   if (pathResult.g1) {
     const [r, g, b] = pathResult.g1
     const L = (r + g + b) / 3
-    assert(L > 120, `rasterized glyph pixel is light (got ${r},${g},${b} L=${L})`)
+    assert(L > 200, `rasterized glyph pixel is light (got ${r},${g},${b} L=${L})`)
   }
 
   assert(typeof elementOverlapsDarkBackdrop === 'function', 'elementOverlapsDarkBackdrop exported')

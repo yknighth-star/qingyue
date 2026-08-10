@@ -30,7 +30,7 @@ assert(isDarkDecorativeBackground('#111111'), '#111 is decorative dark')
 assert(!isDarkDecorativeBackground('#f3ead3'), 'sepia bg is not dark')
 
 const onBlack = contrastTextForBackground('rgb(0, 0, 0)', '#3b2f2f', '#f3ead3')
-assert(onBlack === '#f3ead3', `dark bar on sepia → themeBg light text (got ${onBlack})`)
+assert(onBlack === '#ffffff', `dark bar → pure white text (got ${onBlack})`)
 
 const onLight = contrastTextForBackground('#f3ead3', '#3b2f2f', '#f3ead3')
 assert(onLight === '#3b2f2f', `light surface → theme fg (got ${onLight})`)

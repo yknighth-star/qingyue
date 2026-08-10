@@ -2,10 +2,14 @@ import ePub, { type Book, type NavItem, type Rendition } from 'epubjs'
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
 import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH, THEME_VARS } from '@/utils/format'
 import {
+  LIGHT_ON_DARK_FG,
+  collectSvgTitleBands,
   contrastTextForBackground,
   elementOverlapsDarkBackdrop,
+  forceShortLabelsOnDarkBackdrop,
   isDarkDecorativeBackground,
   isDarkSurfaceCss,
+  isFigureTitleChrome,
   isFigureTitleLike,
   isTransparentCssColor,
   resolveSurfaceBackgroundCss,
@@ -1507,7 +1511,7 @@ html body h6 {
       this.pinThemeStyleLast(doc, styleEl)
 
       const scheme = theme === 'dark' ? 'dark' : 'light'
-      const lightOnDark = contrastTextForBackground('#000000', fg, bg) || '#f4f1ea'
+      const lightOnDark = LIGHT_ON_DARK_FG
       // Match typography specificity: publisher Kindle CSS uses .class !important.
       // :where() has zero specificity and loses — that made only near-green washes
       // look "correct" while sepia/light/dark never stuck on mobile.
@@ -1585,9 +1589,26 @@ html body [data-qy-on-dark='1'] * {
   opacity: 1 !important;
 }
 html body [data-qy-on-dark='1'],
-html body [data-qy-on-dark='1'] * {
+html body [data-qy-on-dark='1'] span,
+html body [data-qy-on-dark='1'] font,
+html body [data-qy-on-dark='1'] a,
+html body [data-qy-on-dark='1'] em,
+html body [data-qy-on-dark='1'] strong,
+html body [data-qy-on-dark='1'] b,
+html body [data-qy-on-dark='1'] i {
   color: ${lightOnDark} !important;
   -webkit-text-fill-color: ${lightOnDark} !important;
+  opacity: 1 !important;
+}
+/* Only mark SVG nodes explicitly — never fill:* under HTML parents (bleaches diagram labels). */
+html body svg text[data-qy-on-dark='1'],
+html body svg text[data-qy-on-dark='1'] tspan,
+html body svg path[data-qy-on-dark='1'],
+html body svg polygon[data-qy-on-dark='1'] {
+  fill: ${lightOnDark} !important;
+  color: ${lightOnDark} !important;
+  stroke: none !important;
+  opacity: 1 !important;
 }
 html body img,
 html body img[class],
@@ -1643,7 +1664,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     const body = doc.body
     if (!win || !body) return
 
-    const lightOnDark = contrastTextForBackground('#000000', fg, bg) || '#f4f1ea'
+    const lightOnDark = LIGHT_ON_DARK_FG
 
     const isMedia = (tag: string) =>
       tag === 'img' ||
@@ -1699,20 +1720,17 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       let nextDark = underDark
 
       if (urlIllust || mediaOnly) {
-        // Keep bitmap illustrations; still force light text on dark title wrappers.
-        if (darkSurface) {
-          const light = contrastTextForBackground(surface!, fg, bg) || lightOnDark
-          nextFg = light
+        // url(...) black title bars: no solid background-color → old wash kept theme-dark text.
+        const short =
+          ((el.textContent || '').replace(/\s+/g, '').trim().length <= 24 &&
+            (el.textContent || '').replace(/\s+/g, '').trim().length > 0) ||
+          titleLike
+        if (darkSurface || (urlIllust && short) || underDark) {
+          nextFg = lightOnDark
           nextDark = true
-          applyText(el, light, true)
-        } else if (underDark || titleLike) {
-          nextFg = underDark ? inheritedFg === fg ? lightOnDark : inheritedFg : inheritedFg
-          if (underDark) {
-            nextDark = true
-            applyText(el, nextFg, true)
-          } else {
-            applyText(el, inheritedFg, false)
-          }
+          applyText(el, lightOnDark, true)
+        } else if (titleLike) {
+          applyText(el, inheritedFg, false)
         } else {
           applyText(el, inheritedFg, false)
         }
@@ -1775,8 +1793,12 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       if (child instanceof HTMLElement) walk(child, 0, fg, false)
     }
 
+    // Hard pass: short labels on dark img/svg/url pills (no class heuristics).
+    forceShortLabelsOnDarkBackdrop(doc, fg)
+
     // SVG diagrams: title text uses fill/currentColor, not CSS color. HTML wash skips <svg>.
     this.paintSvgTextContrast(doc, lightOnDark, fg)
+    this.scheduleSvgContrastRetries(doc, lightOnDark, fg)
   }
 
   /**
@@ -1784,6 +1806,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
    * - <text> fill=currentColor → theme fg makes dark-on-black
    * - CN diagrams often draw titles as <path> glyphs (not <text>) with the same bug
    * - Raise text paint order so a later black rect cannot cover glyphs
+   * - Title-band heuristic for PC where getBBox/isPointInFill is unreliable mid-layout
    */
   private paintSvgTextContrast(doc: Document, light: string, dark: string) {
     const win = doc.defaultView
@@ -1793,9 +1816,12 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     } catch {
       /* */
     }
+    const lightFg = light || LIGHT_ON_DARK_FG
 
     doc.querySelectorAll('svg').forEach((svg) => {
       if (!(svg instanceof SVGSVGElement)) return
+
+      const titleBands = collectSvgTitleBands(svg, currentColor)
 
       // Paint order: later nodes win. Move titles above decorative bars.
       const texts = Array.from(svg.querySelectorAll('text'))
@@ -1811,16 +1837,21 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         if (!(node instanceof SVGTextElement)) return
         const fill = resolveSvgTextFill({
           textEl: node,
-          light,
+          light: lightFg,
           dark,
           currentColor,
+          titleBands,
         })
         node.style.setProperty('fill', fill, 'important')
         node.style.setProperty('color', fill, 'important')
+        if (fill === lightFg) node.setAttribute('data-qy-on-dark', '1')
+        else node.removeAttribute('data-qy-on-dark')
         node.querySelectorAll('tspan').forEach((t) => {
           if (t instanceof SVGTSpanElement) {
             t.style.setProperty('fill', fill, 'important')
             t.style.setProperty('color', fill, 'important')
+            if (fill === lightFg) t.setAttribute('data-qy-on-dark', '1')
+            else t.removeAttribute('data-qy-on-dark')
           }
         })
       })
@@ -1831,13 +1862,18 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         if (!(node instanceof SVGGeometryElement)) return
         const fill = shouldLightenSvgGlyphShape({
           shape: node,
-          light,
+          light: lightFg,
           dark,
           currentColor,
           themeFg: dark,
+          titleBands,
         })
-        if (!fill) return
+        if (!fill) {
+          node.removeAttribute('data-qy-on-dark')
+          return
+        }
         node.style.setProperty('fill', fill, 'important')
+        node.setAttribute('data-qy-on-dark', '1')
         glyphPaths.push(node)
       })
       // Keep lightened glyphs above the black capsule.
@@ -1849,6 +1885,30 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         }
       }
     })
+  }
+
+  /** PC dual-column / late multicol layout: getBBox is empty on first paint — retry SVG wash. */
+  private scheduleSvgContrastRetries(doc: Document, light: string, dark: string) {
+    const run = () => {
+      if (!doc.defaultView || doc.defaultView.closed) return
+      forceShortLabelsOnDarkBackdrop(doc, dark)
+      this.paintSvgTextContrast(doc, light, dark)
+    }
+    try {
+      doc.defaultView?.requestAnimationFrame(() => {
+        run()
+        doc.defaultView?.requestAnimationFrame(run)
+      })
+    } catch {
+      /* */
+    }
+    for (const ms of [80, 250, 700, 1600]) {
+      const timer = window.setTimeout(() => {
+        this.themeRepaintTimers = this.themeRepaintTimers.filter((t) => t !== timer)
+        run()
+      }, ms)
+      this.themeRepaintTimers.push(timer)
+    }
   }
 
   /** Match iframe / epub-view chrome to theme — gaps around columns show host bg. */
@@ -1981,9 +2041,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       display: 'block !important',
       width: '100% !important',
       'max-width': '100% !important',
-      position: 'static !important',
-      left: 'auto !important',
-      right: 'auto !important',
+      // Do NOT force position:static here — kills absolute figure titles on black pills (PC).
     }
     // Paginated: never clamp html/body width or overflow-x — epub.js expand() builds a
     // wide multi-column strip and measures scrollWidth. Forcing width/max-width:100% or
@@ -2117,6 +2175,12 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
    */
   private normalizeChapterTitles(doc: Document) {
     const applyCenter = (el: HTMLElement) => {
+      // Never flatten figure overlay captions — position:static pulls them off black pills.
+      if (isFigureTitleChrome(el)) {
+        el.style.setProperty('text-align', 'center', 'important')
+        el.style.setProperty('text-indent', '0', 'important')
+        return
+      }
       el.style.setProperty('text-align', 'center', 'important')
       el.style.setProperty('text-indent', '0', 'important')
       el.style.setProperty('margin-left', '0', 'important')

@@ -37,7 +37,7 @@ assert(
 assert(!colorsFromBackgroundImage('url(foo.png)').length, 'url() ignored')
 
 const light = contrastTextForBackground('#000', '#3b2f2f', '#f3ead3')
-assert(light === '#f3ead3', `light on dark = themeBg (got ${light})`)
+assert(light === '#ffffff', `light on dark = white (got ${light})`)
 
 // Playwright: DOM wash simulation
 const browser = await chromium.launch({ headless: true })

@@ -75,7 +75,7 @@ try {
       const color = onDark ? light : dark
       textEl.style.setProperty('fill', color, 'important')
     })
-  }, { light: '#f3ead3', dark: '#3b2f2f' })
+  }, { light: '#ffffff', dark: '#3b2f2f' })
 
   const after = await page.evaluate(() => {
     const title = document.getElementById('title')
@@ -86,7 +86,7 @@ try {
     }
   })
 
-  assert(/f3ead3|243,\s*234,\s*211/i.test(after.title), `title on black bar is light (got ${after.title})`)
+  assert(/ffffff|255,\s*255,\s*255/i.test(after.title), `title on black bar is light (got ${after.title})`)
   assert(/3b2f2f|59,\s*47,\s*47/i.test(after.label), `label on white stays dark (got ${after.label})`)
 
   // Unit path via imported helper in page is hard; at least ensure export works
