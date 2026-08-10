@@ -47,6 +47,10 @@ export class EpubEngine implements ReaderEngine {
   private themeApplyDepth = 0
   /** Ignore MutationObserver echoes from our own inline theme writes. */
   private themeQuietUntil = 0
+  /** Pending theme-guard reapply (debounced; avoids height thrash loops). */
+  private themeGuardTimers = new WeakMap<Document, number>()
+  /** scheduleThemeRepaint timeouts — cleared on destroy / remount. */
+  private themeRepaintTimers: number[] = []
   /** blob: URLs for publisher fonts rewritten out of about:srcdoc. */
   private fontUrlCache = new Map<string, string>()
   private pageTurn: PageTurnMode = 'slide'
@@ -189,8 +193,11 @@ export class EpubEngine implements ReaderEngine {
   private observeResize(el: HTMLElement) {
     this.resizeObserver?.disconnect()
     this.resizeObserver = new ResizeObserver(() => {
+      // Theme paint / stylesheet reorder can briefly perturb layout; ignore during quiet.
+      if (this.layoutLocked || this.themeApplyDepth > 0) return
+      if (performance.now() < this.themeQuietUntil) return
       if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
-      this.resizeTimer = window.setTimeout(() => this.handleResize(false), 160)
+      this.resizeTimer = window.setTimeout(() => this.handleResize(false), 180)
     })
     this.resizeObserver.observe(el)
     const stage = el.parentElement
@@ -621,6 +628,8 @@ export class EpubEngine implements ReaderEngine {
     this.resizeTimer = null
     this.resizeObserver?.disconnect()
     this.resizeObserver = null
+    for (const t of this.themeRepaintTimers) window.clearTimeout(t)
+    this.themeRepaintTimers = []
     this.mark.reset()
     revokeFontUrlCache(this.fontUrlCache)
     try {
@@ -628,9 +637,13 @@ export class EpubEngine implements ReaderEngine {
         this.rendition as unknown as { getContents?: () => ContentsDoc[] }
       )?.getContents?.()
       contents?.forEach((c) => {
-        const obs = c.document && this.themeDocGuards.get(c.document)
-        obs?.disconnect()
-        if (c.document) this.themeDocGuards.delete(c.document)
+        const doc = c.document
+        if (!doc) return
+        const guardTimer = this.themeGuardTimers.get(doc)
+        if (guardTimer) window.clearTimeout(guardTimer)
+        this.themeGuardTimers.delete(doc)
+        this.themeDocGuards.get(doc)?.disconnect()
+        this.themeDocGuards.delete(doc)
       })
     } catch {
       /* */
@@ -1268,11 +1281,22 @@ html body h6 {
 
   private ensureThemeDocGuard(doc: Document) {
     if (this.themeDocGuards.has(doc)) return
-    const reapply = () => {
+    const scheduleReapply = (force: boolean) => {
       if (this.themeApplyDepth > 0 || !this.settings) return
       if (performance.now() < this.themeQuietUntil) return
       if (!doc.defaultView || doc.defaultView.closed) return
-      this.applyThemeColorsToDocument(doc, this.settings, true)
+      const prev = this.themeGuardTimers.get(doc)
+      if (prev) window.clearTimeout(prev)
+      const settings = this.settings
+      const timer = window.setTimeout(() => {
+        this.themeGuardTimers.delete(doc)
+        if (!this.settings || this.settings !== settings) return
+        if (!doc.defaultView || doc.defaultView.closed) return
+        if (this.themeApplyDepth > 0 || performance.now() < this.themeQuietUntil) return
+        // Soft by default: full wash only when our theme sheet lost cascade order.
+        this.applyThemeColorsToDocument(doc, settings, force)
+      }, 120)
+      this.themeGuardTimers.set(doc, timer)
     }
     const observer = new MutationObserver((mutations) => {
       if (this.themeApplyDepth > 0 || performance.now() < this.themeQuietUntil) return
@@ -1280,7 +1304,7 @@ html body h6 {
         if (m.type === 'attributes') {
           const t = m.target
           if (t === doc.documentElement || t === doc.body) {
-            reapply()
+            scheduleReapply(false)
             return
           }
           continue
@@ -1294,11 +1318,11 @@ html body h6 {
             tag === 'STYLE' ||
             (tag === 'LINK' && (n as HTMLLinkElement).rel === 'stylesheet')
           ) {
-            reapply()
+            scheduleReapply(true)
             return
           }
           if (n.querySelector?.('style, link[rel="stylesheet"]')) {
-            reapply()
+            scheduleReapply(true)
             return
           }
         }
@@ -1320,7 +1344,7 @@ html body h6 {
     }
     this.themeDocGuards.set(doc, observer)
 
-    const onSheet = () => reapply()
+    const onSheet = () => scheduleReapply(true)
     doc.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
       link.addEventListener('load', onSheet)
       link.addEventListener('error', onSheet)
@@ -1344,8 +1368,24 @@ html body h6 {
 
     this.themeApplyDepth += 1
     try {
-      if (!force && styleEl?.textContent && root.dataset.qyTheme === fp) {
-        if (root.lastElementChild !== styleEl) this.pinThemeStyleLast(doc, styleEl)
+      // Idempotent soft path: rewriting the huge theme sheet + walking washes
+      // forces layout and looks like height flicker on PC chapter views.
+      // Only full-rebuild when fingerprint changed or stylesheet is missing.
+      if (styleEl?.textContent && root.dataset.qyTheme === fp) {
+        const needsPin = root.lastElementChild !== styleEl
+        if (needsPin) this.pinThemeStyleLast(doc, styleEl)
+        root.style.setProperty('background-color', bg, 'important')
+        root.style.setProperty('background-image', 'none', 'important')
+        root.style.setProperty('color', fg, 'important')
+        const body = doc.body
+        if (body) {
+          body.style.setProperty('background-color', bg, 'important')
+          body.style.setProperty('background-image', 'none', 'important')
+          body.style.setProperty('color', fg, 'important')
+          body.style.setProperty('-webkit-text-fill-color', fg, 'important')
+          // Publisher injected a later stylesheet that stole cascade order.
+          if (force && needsPin) this.paintPublisherWashes(doc, bg, fg)
+        }
         this.paintHostSurfaces(doc, bg)
         this.ensureThemeDocGuard(doc)
         return
@@ -1467,7 +1507,8 @@ html body :has(> canvas):not(body) {
       this.ensureThemeDocGuard(doc)
     } finally {
       this.themeApplyDepth -= 1
-      this.themeQuietUntil = performance.now() + 80
+      // Quiet long enough to absorb MutationObserver + ResizeObserver echoes.
+      this.themeQuietUntil = performance.now() + 220
     }
   }
 
@@ -1570,12 +1611,15 @@ html body :has(> canvas):not(body) {
     if (!this.settings) return
     const settings = this.settings
     // Late publisher CSS + chapter scripts often paint after first frame on mobile WebKit.
-    for (const ms of [0, 50, 150, 400, 900, 1800, 3200]) {
-      window.setTimeout(() => {
+    // First tick: full wash. Later ticks: soft reassert only (avoids PC height thrash).
+    for (const [i, ms] of [0, 160, 500, 1400].entries()) {
+      const timer = window.setTimeout(() => {
+        this.themeRepaintTimers = this.themeRepaintTimers.filter((t) => t !== timer)
         if (!this.settings || this.settings !== settings) return
         if (!doc.defaultView || doc.defaultView.closed) return
-        this.applyThemeColorsToDocument(doc, settings, true)
+        this.applyThemeColorsToDocument(doc, settings, i === 0)
       }, ms)
+      this.themeRepaintTimers.push(timer)
     }
   }
 
@@ -1615,7 +1659,7 @@ html body :has(> canvas):not(body) {
           this.paintHostSurfaces(doc, bg)
         } finally {
           this.themeApplyDepth -= 1
-          this.themeQuietUntil = performance.now() + 80
+          this.themeQuietUntil = performance.now() + 220
         }
       })
     } catch {
@@ -1672,43 +1716,49 @@ html body :has(> canvas):not(body) {
       left: 'auto !important',
       right: 'auto !important',
     }
+    // Paginated: never clamp html/body width — epub.js expand() builds a wide
+    // multi-column strip. Forcing width/max-width:100% fights expand and causes
+    // height/layout thrash on some chapters (PC dual-column / long chapters).
+    const htmlRules: Record<string, string> = {
+      'overflow-x': 'hidden !important',
+      'box-sizing': 'border-box !important',
+      'background-color': `${bg} !important`,
+      'background-image': 'none !important',
+      color: `${fg} !important`,
+    }
+    const bodyRules: Record<string, string> = {
+      'background-color': `${bg} !important`,
+      'background-image': 'none !important',
+      color: `${fg} !important`,
+      ...typeface,
+      margin: '0 !important',
+      cursor: 'default !important',
+      'caret-color': 'transparent !important',
+      'user-select': 'text !important',
+      '-webkit-user-select': 'text !important',
+      'overflow-x': 'hidden !important',
+      'box-sizing': 'border-box !important',
+      'word-wrap': 'break-word !important',
+      'overflow-wrap': 'anywhere !important',
+    }
+    if (settings.pageTurn === 'scroll') {
+      htmlRules['max-width'] = '100% !important'
+      htmlRules.width = '100% !important'
+      bodyRules['max-width'] = '100% !important'
+      bodyRules.width = '100% !important'
+      bodyRules.padding = `${settings.marginY}px ${settings.marginX}px !important`
+    } else {
+      bodyRules['padding-top'] = '0 !important'
+      bodyRules['padding-bottom'] = '0 !important'
+      bodyRules['padding-left'] = '0 !important'
+      bodyRules['padding-right'] = '0 !important'
+    }
     this.rendition.themes.default({
-      html: {
-        'overflow-x': 'hidden !important',
-        'max-width': '100% !important',
-        'box-sizing': 'border-box !important',
-        'background-color': `${bg} !important`,
-        'background-image': 'none !important',
-        color: `${fg} !important`,
-      },
+      html: htmlRules,
       '*, *::before, *::after': {
         'box-sizing': 'border-box !important',
       },
-      body: {
-        'background-color': `${bg} !important`,
-        'background-image': 'none !important',
-        color: `${fg} !important`,
-        ...typeface,
-        margin: '0 !important',
-        cursor: 'default !important',
-        'caret-color': 'transparent !important',
-        'user-select': 'text !important',
-        '-webkit-user-select': 'text !important',
-        'overflow-x': 'hidden !important',
-        'max-width': '100% !important',
-        width: '100% !important',
-        'box-sizing': 'border-box !important',
-        'word-wrap': 'break-word !important',
-        'overflow-wrap': 'anywhere !important',
-        ...(settings.pageTurn === 'scroll'
-          ? { padding: `${settings.marginY}px ${settings.marginX}px !important` }
-          : {
-              'padding-top': '0 !important',
-              'padding-bottom': '0 !important',
-              'padding-left': '0 !important',
-              'padding-right': '0 !important',
-            }),
-      },
+      body: bodyRules,
       'body p, body div, body li, body td, body th, body blockquote, body section, body article':
         {
           ...typeface,
