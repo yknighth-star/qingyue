@@ -57,6 +57,9 @@ html body video,
 html body canvas,
 html body svg,
 html body figure {
+  display: block !important;
+  float: none !important;
+  min-width: 0 !important;
   max-width: 100vw !important;
   max-height: 92vh !important;
   object-fit: contain !important;
@@ -206,6 +209,10 @@ function applyScrollMedia(el: HTMLElement | SVGElement) {
 
 function applyPaginatedMedia(el: HTMLElement | SVGElement, box: ColumnPageBox) {
   // Pixel caps only — never max-width:100% (multicol % = whole strip).
+  el.style.setProperty('display', 'block', 'important')
+  el.style.setProperty('float', 'none', 'important')
+  el.style.setProperty('min-width', '0', 'important')
+  el.style.setProperty('min-height', '0', 'important')
   el.style.setProperty('max-width', `${box.maxW}px`, 'important')
   el.style.setProperty('max-height', `${box.maxH}px`, 'important')
   el.style.setProperty('object-fit', 'contain', 'important')
@@ -215,14 +222,51 @@ function applyPaginatedMedia(el: HTMLElement | SVGElement, box: ColumnPageBox) {
   el.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
 
   const intrinsic = resolveMediaIntrinsicSize(el)
-  if (!intrinsic) return
+  if (intrinsic) {
+    const scale = Math.min(1, box.maxW / intrinsic.w, box.maxH / intrinsic.h)
+    const w = Math.max(1, Math.round(intrinsic.w * scale))
+    const h = Math.max(1, Math.round(intrinsic.h * scale))
+    // Explicit px beats presentational attrs and avoids 1×1 collapse from height:auto.
+    el.style.setProperty('width', `${w}px`, 'important')
+    el.style.setProperty('height', `${h}px`, 'important')
+  }
 
-  const scale = Math.min(1, box.maxW / intrinsic.w, box.maxH / intrinsic.h)
-  const w = Math.max(1, Math.round(intrinsic.w * scale))
-  const h = Math.max(1, Math.round(intrinsic.h * scale))
-  // Explicit px beats presentational attrs and avoids 1×1 collapse from height:auto.
-  el.style.setProperty('width', `${w}px`, 'important')
-  el.style.setProperty('height', `${h}px`, 'important')
+  // Publisher wrappers with fixed px widths still expand the multicol strip and
+  // slice the figure across pages — clamp the whole ancestor chain.
+  if (el instanceof HTMLElement) clampMediaAncestors(el, box)
+}
+
+/**
+ * Walk up from a media node and kill fixed widths that spill into the next column.
+ */
+export function clampMediaAncestors(el: HTMLElement, box: ColumnPageBox): void {
+  const maxWCss = `${box.maxW}px`
+  const doc = el.ownerDocument
+  let p: HTMLElement | null = el.parentElement
+  let depth = 0
+  while (p && p !== doc.body && p !== doc.documentElement && depth < 10) {
+    p.style.setProperty('max-width', maxWCss, 'important')
+    p.style.setProperty('box-sizing', 'border-box', 'important')
+    p.style.setProperty('overflow-x', 'hidden', 'important')
+    p.style.setProperty('break-inside', 'avoid-column', 'important')
+    p.style.setProperty('page-break-inside', 'avoid', 'important')
+    p.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
+    p.style.setProperty('float', 'none', 'important')
+    p.style.setProperty('min-width', '0', 'important')
+
+    const attrW = p.getAttribute('width') || ''
+    const styleW = p.style.width || ''
+    if (/px|pt|cm|mm|in/i.test(attrW) || /px|pt|cm|mm|in/i.test(styleW)) {
+      p.style.setProperty('width', 'auto', 'important')
+    }
+    // Percent widths against the expanded strip also blow past the page box.
+    if (/%/.test(styleW) || /%/.test(attrW)) {
+      p.style.setProperty('width', 'auto', 'important')
+    }
+
+    p = p.parentElement
+    depth += 1
+  }
 }
 
 function applyWrapperAvoid(el: HTMLElement, box: ColumnPageBox) {
@@ -311,7 +355,7 @@ export function fitMediaInDocument(
 
   fitWideBlocksInDocument(doc, box)
 
-  // Second pass: anything still fragmented across columns gets forced smaller.
+  // Second pass: anything still fragmented / overflowing the page box → force smaller.
   doc.querySelectorAll('img, svg, video, canvas').forEach((node) => {
     if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) return
     let rects: DOMRectList
@@ -320,13 +364,13 @@ export function fitMediaInDocument(
     } catch {
       return
     }
-    if (rects.length <= 1) {
-      const w = rects[0]?.width ?? 0
-      if (w <= box.maxW + 2) return
-    }
+    const fragmented = rects.length > 1
+    const tooWide = (rects[0]?.width ?? 0) > box.maxW + 2
+    const tooTall = (rects[0]?.height ?? 0) > box.maxH + 2
+    if (!fragmented && !tooWide && !tooTall) return
     applyPaginatedMedia(node, {
-      maxW: Math.max(64, Math.floor(box.maxW * 0.92)),
-      maxH: Math.max(64, Math.floor(box.maxH * 0.92)),
+      maxW: Math.max(48, Math.floor(box.maxW * 0.88)),
+      maxH: Math.max(48, Math.floor(box.maxH * 0.88)),
     })
   })
 }

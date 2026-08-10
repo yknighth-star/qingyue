@@ -310,9 +310,14 @@ export class EpubEngine implements ReaderEngine {
       this.mediaReflowing = true
       this.mediaQuietUntil = performance.now() + 450
       try {
+        // Fit first (shrink figures), then resize so epub.js rebuilds columns
+        // around the new sizes — otherwise the old wide-column geometry sticks.
         this.containOverflowMediaAll()
         this.applyResize(true)
-        this.snapPaginatedScroll()
+        window.setTimeout(() => {
+          this.containOverflowMediaAll()
+          this.snapPaginatedScroll()
+        }, 80)
       } finally {
         this.mediaReflowing = false
       }

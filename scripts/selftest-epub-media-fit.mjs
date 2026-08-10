@@ -31,7 +31,7 @@ html body img, html body picture, html body video, html body canvas, html body s
 }
 
 function fitPaginatedScript() {
-  // Injected into page — mirrors applyPaginatedMedia (pixel caps, no max-width:100%)
+  // Injected into page — mirrors applyPaginatedMedia + ancestor clamp
   return `
     function parseSizeAttr(el, name) {
       const raw = el.getAttribute(name)
@@ -53,7 +53,24 @@ function fitPaginatedScript() {
       if (r.width >= 2 && r.height >= 2) return { w: r.width, h: r.height }
       return null
     }
+    function clampAncestors(el, box) {
+      const maxWCss = box.maxW + 'px'
+      let p = el.parentElement
+      let depth = 0
+      while (p && p !== document.body && p !== document.documentElement && depth < 10) {
+        p.style.setProperty('max-width', maxWCss, 'important')
+        p.style.setProperty('box-sizing', 'border-box', 'important')
+        p.style.setProperty('overflow-x', 'hidden', 'important')
+        p.style.setProperty('break-inside', 'avoid-column', 'important')
+        p.style.setProperty('width', 'auto', 'important')
+        p = p.parentElement
+        depth++
+      }
+    }
     function applyPaginated(el, box) {
+      el.style.setProperty('display', 'block', 'important')
+      el.style.setProperty('float', 'none', 'important')
+      el.style.setProperty('min-width', '0', 'important')
       el.style.setProperty('max-width', box.maxW + 'px', 'important')
       el.style.setProperty('max-height', box.maxH + 'px', 'important')
       el.style.setProperty('object-fit', 'contain', 'important')
@@ -62,10 +79,12 @@ function fitPaginatedScript() {
       el.style.setProperty('page-break-inside', 'avoid', 'important')
       el.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
       const intrinsic = resolveIntrinsic(el)
-      if (!intrinsic) return
-      const scale = Math.min(1, box.maxW / intrinsic.w, box.maxH / intrinsic.h)
-      el.style.setProperty('width', Math.max(1, Math.round(intrinsic.w * scale)) + 'px', 'important')
-      el.style.setProperty('height', Math.max(1, Math.round(intrinsic.h * scale)) + 'px', 'important')
+      if (intrinsic) {
+        const scale = Math.min(1, box.maxW / intrinsic.w, box.maxH / intrinsic.h)
+        el.style.setProperty('width', Math.max(1, Math.round(intrinsic.w * scale)) + 'px', 'important')
+        el.style.setProperty('height', Math.max(1, Math.round(intrinsic.h * scale)) + 'px', 'important')
+      }
+      if (el instanceof HTMLElement) clampAncestors(el, box)
     }
   `
 }
@@ -274,6 +293,62 @@ async function run() {
         ok = false
       } else {
         console.log(`PASS dual box width ${dualBox.maxW} (half of 1200-gap)`)
+      }
+    }
+
+    // --- 4b) Fixed-width wrapper must not keep image spilling across columns ---
+    {
+      await page.setContent(`<!DOCTYPE html><html><body style="margin:0">
+        <iframe id="f" style="width:${STAGE_W}px;height:${STAGE_H}px;border:0"></iframe>
+      </body></html>`)
+      const frame = await (await page.$('#f')).contentFrame()
+      await frame.setContent(`<!DOCTYPE html><html><head><meta charset="utf-8"/>
+        <style>
+          html, body { margin: 0; height: ${STAGE_H}px; }
+          body {
+            width: ${STAGE_W * 3}px;
+            column-width: ${STAGE_W}px;
+            column-gap: 0;
+            column-fill: auto;
+            height: ${STAGE_H}px;
+            overflow: hidden;
+          }
+        </style>
+      </head><body>
+        <div id="wrap" style="width:720px">
+          <img id="card" src="${dataUrl}" width="720" height="1100" alt="card"/>
+        </div>
+      </body></html>`)
+      await frame.evaluate(() =>
+        Promise.all(
+          [...document.images].map((i) =>
+            i.complete ? 1 : new Promise((r) => { i.onload = i.onerror = r }),
+          ),
+        ),
+      )
+      await frame.evaluate(
+        ({ box, fitFn }) => {
+          eval(fitFn)
+          applyPaginated(document.getElementById('card'), box)
+        },
+        { box, fitFn },
+      )
+      await page.waitForTimeout(60)
+      const wrap = await frame.evaluate(() => {
+        const img = document.getElementById('card')
+        const wrap = document.getElementById('wrap')
+        return {
+          imgRects: img.getClientRects().length,
+          imgW: Math.round(img.getBoundingClientRect().width),
+          imgH: Math.round(img.getBoundingClientRect().height),
+          wrapW: Math.round(wrap.getBoundingClientRect().width),
+        }
+      })
+      if (wrap.imgRects !== 1 || wrap.imgW > box.maxW + 2 || wrap.imgH > box.maxH + 2 || wrap.wrapW > box.maxW + 2) {
+        console.error('FAIL fixed wrapper still spills:', wrap, 'box', box)
+        ok = false
+      } else {
+        console.log(`PASS fixed-wrapper clamp: img ${wrap.imgW}x${wrap.imgH}, wrap ${wrap.wrapW}`)
       }
     }
 
