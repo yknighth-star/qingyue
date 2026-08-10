@@ -683,28 +683,38 @@ export class EpubEngine implements ReaderEngine {
     this.syncAllDocsTouchAction()
     this.applyThemeToRendition(settings)
     this.applyTypographyToAllContents(settings)
-    // pageTurn only applied at open() before — switch flow live when mode changes
-    if (this.rendition && prevTurn !== settings.pageTurn) {
-      const flow = settings.pageTurn === 'scroll' ? 'scrolled-doc' : 'paginated'
+
+    const scrollMode = settings.pageTurn === 'scroll'
+    const prevScrollMode = prevTurn === 'scroll'
+    const flowChanged = scrollMode !== prevScrollMode
+
+    // pageTurn only applied at open() before — switch flow live when scroll↔paged flips
+    if (this.rendition && flowChanged) {
+      const flow = scrollMode ? 'scrolled-doc' : 'paginated'
       try {
         ;(this.rendition as unknown as { flow: (f: string) => void }).flow(flow)
         const mgr = (this.rendition as unknown as { manager?: { overflow?: (o: string) => void } }).manager
-        mgr?.overflow?.(settings.pageTurn === 'scroll' ? 'scroll' : 'hidden')
+        mgr?.overflow?.(scrollMode ? 'scroll' : 'hidden')
         this.lockEpubHorizontalOverflow()
       } catch (err) {
         console.warn('epub flow switch failed', err)
       }
     }
+
     // Dual-column spread: only paginated + wide screen
     const wantSpread = this.isDualSpread(settings)
     const prevWantSpread = !!prev && this.isDualSpread({ ...prev, pageTurn: prevTurn })
-    if (this.rendition && (wantSpread !== prevWantSpread || prevTurn !== settings.pageTurn)) {
+    const spreadChanged = wantSpread !== prevWantSpread
+    // Full clear+display only when column geometry changes. slide↔curl stays paginated —
+    // do NOT rebuild+resize together (race leaves a blank first page until next turn).
+    if (this.rendition && (spreadChanged || flowChanged)) {
       void this.rebuildForSpread(wantSpread)
-    } else {
-      this.syncDualColumnAttr(wantSpread)
+      return
     }
+
+    this.syncDualColumnAttr(wantSpread)
     // Margins / font metrics change the content box — must re-paginate.
-    const typographyChanged =
+    const metricsChanged =
       !prev ||
       prev.marginX !== settings.marginX ||
       prev.marginY !== settings.marginY ||
@@ -712,11 +722,13 @@ export class EpubEngine implements ReaderEngine {
       prev.lineHeight !== settings.lineHeight ||
       prev.paragraphGap !== settings.paragraphGap ||
       prev.indent !== settings.indent ||
-      prev.fontFamily !== settings.fontFamily ||
-      prevTurn !== settings.pageTurn
-    // Spread rebuild already resizes; avoid racing a second resize.
-    if (typographyChanged && wantSpread === prevWantSpread) {
+      prev.fontFamily !== settings.fontFamily
+    if (metricsChanged) {
       this.resizeToContainer()
+    } else if (prevTurn !== settings.pageTurn) {
+      // slide↔curl: chrome/dataset only — snap + drop leftover turn classes
+      this.snapPaginatedScroll()
+      this.clearTurnArtifacts()
     }
   }
 
@@ -771,10 +783,13 @@ export class EpubEngine implements ReaderEngine {
       console.warn('epub redisplay after spread failed', err)
     }
 
-    window.setTimeout(() => {
-      this.lockEpubHorizontalOverflow()
-      if (this.settings) this.applyTypographyToAllContents(this.settings)
-    }, 100)
+    // Let columns paint, then snap scrollLeft — mid-column offset looks like a blank page.
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+    this.overflowLocked = false
+    this.lockEpubHorizontalOverflow()
+    this.snapPaginatedScroll()
+    this.clearTurnArtifacts()
+    if (this.settings) this.applyTypographyToAllContents(this.settings)
   }
 
   getToc() {
@@ -867,6 +882,21 @@ export class EpubEngine implements ReaderEngine {
     root.style.removeProperty('box-shadow')
     root.style.removeProperty('will-change')
     root.style.removeProperty('opacity')
+    root.style.removeProperty('visibility')
+    root.classList.remove(
+      'slide-hold',
+      'slide-out-next',
+      'slide-out-prev',
+      'slide-in-next',
+      'slide-in-prev',
+      'curl-hold',
+      'curl-out-next',
+      'curl-out-prev',
+      'curl-in-next',
+      'curl-in-prev',
+      'curl-under-next',
+      'curl-under-prev',
+    )
     const host = root.parentElement
     if (host) {
       host.style.removeProperty('perspective')
@@ -1716,11 +1746,10 @@ html body :has(> canvas):not(body) {
       left: 'auto !important',
       right: 'auto !important',
     }
-    // Paginated: never clamp html/body width — epub.js expand() builds a wide
-    // multi-column strip. Forcing width/max-width:100% fights expand and causes
-    // height/layout thrash on some chapters (PC dual-column / long chapters).
+    // Paginated: never clamp html/body width or overflow-x — epub.js expand() builds a
+    // wide multi-column strip and measures scrollWidth. Forcing width/max-width:100% or
+    // overflow-x:hidden fights expand (height thrash / blank first page until turn).
     const htmlRules: Record<string, string> = {
-      'overflow-x': 'hidden !important',
       'box-sizing': 'border-box !important',
       'background-color': `${bg} !important`,
       'background-image': 'none !important',
@@ -1736,14 +1765,15 @@ html body :has(> canvas):not(body) {
       'caret-color': 'transparent !important',
       'user-select': 'text !important',
       '-webkit-user-select': 'text !important',
-      'overflow-x': 'hidden !important',
       'box-sizing': 'border-box !important',
       'word-wrap': 'break-word !important',
       'overflow-wrap': 'anywhere !important',
     }
     if (settings.pageTurn === 'scroll') {
+      htmlRules['overflow-x'] = 'hidden !important'
       htmlRules['max-width'] = '100% !important'
       htmlRules.width = '100% !important'
+      bodyRules['overflow-x'] = 'hidden !important'
       bodyRules['max-width'] = '100% !important'
       bodyRules.width = '100% !important'
       bodyRules.padding = `${settings.marginY}px ${settings.marginX}px !important`
