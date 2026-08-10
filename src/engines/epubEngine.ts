@@ -1,6 +1,11 @@
 import ePub, { type Book, type NavItem, type Rendition } from 'epubjs'
 import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit, TocItem } from '@/types'
 import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH, THEME_VARS } from '@/utils/format'
+import {
+  contrastTextForBackground,
+  isDarkDecorativeBackground,
+  isTransparentCssColor,
+} from '@/utils/colorContrast'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
 import {
@@ -1428,8 +1433,8 @@ html body h6 {
           body.style.setProperty('background-image', 'none', 'important')
           body.style.setProperty('color', fg, 'important')
           body.style.setProperty('-webkit-text-fill-color', fg, 'important')
-          // Publisher injected a later stylesheet that stole cascade order.
-          if (force && needsPin) this.paintPublisherWashes(doc, bg, fg)
+          // Always re-run contrast wash: dark figure bars need light text (soft path too).
+          this.paintPublisherWashes(doc, bg, fg)
         }
         this.paintHostSurfaces(doc, bg)
         this.ensureThemeDocGuard(doc)
@@ -1480,27 +1485,6 @@ html body h6 {
       ]
         .flatMap((t) => [`html body ${t}`, `html body ${t}[class]`, `html body ${t}[style]`])
         .join(',\n')
-      const fillSel = [
-        'p',
-        'div',
-        'li',
-        'td',
-        'th',
-        'blockquote',
-        'section',
-        'article',
-        'pre',
-        'figure',
-        'figcaption',
-        'caption',
-      ]
-        .flatMap((t) => [
-          `html body ${t}`,
-          `html body ${t}[class]`,
-          `html body ${t}[style]`,
-        ])
-        .join(',\n')
-      // Publisher figure titles often use gray #999 / opacity on .caption classes.
       const captionSel = [
         'html body figcaption',
         'html body figcaption[class]',
@@ -1534,12 +1518,8 @@ ${textSel} {
   color: ${fg} !important;
   -webkit-text-fill-color: ${fg} !important;
 }
-${fillSel} {
-  background-color: ${bg} !important;
-}
+/* Caption opacity only — text color comes from contrast wash (dark pills → light glyphs). */
 ${captionSel} {
-  color: ${fg} !important;
-  -webkit-text-fill-color: ${fg} !important;
   opacity: 1 !important;
 }
 html body img,
@@ -1553,10 +1533,13 @@ html body embed {
   background-color: transparent !important;
   -webkit-text-fill-color: initial !important;
   color: inherit !important;
-  max-width: 100% !important;
+  /* 100vw = iframe page width; 100% fails inside epub.js multicol (spills to next page). */
+  max-width: 100vw !important;
   max-height: 92vh !important;
   object-fit: contain !important;
   box-sizing: border-box !important;
+  break-inside: avoid !important;
+  -webkit-column-break-inside: avoid !important;
 }
 html body img,
 html body img[class],
@@ -1571,9 +1554,8 @@ html body :has(> picture):not(body),
 html body :has(> video):not(body),
 html body :has(> canvas):not(body) {
   background-color: transparent !important;
-  color: ${fg} !important;
-  -webkit-text-fill-color: ${fg} !important;
-  max-width: 100% !important;
+  max-width: 100vw !important;
+  box-sizing: border-box !important;
 }
 `.trim()
 
@@ -1598,7 +1580,10 @@ html body :has(> canvas):not(body) {
     }
   }
 
-  /** Override solid publisher color washes; skip media and CSS url(...) illustrations. */
+  /**
+   * Override publisher color washes with theme colors, but keep dark decorative
+   * surfaces (black figure-title pills) and put light text on them for contrast.
+   */
   private paintPublisherWashes(doc: Document, bg: string, fg: string) {
     const win = doc.defaultView
     const body = doc.body
@@ -1624,13 +1609,15 @@ html body :has(> canvas):not(body) {
       return !!bi && bi !== 'none' && /url\(/i.test(bi)
     }
 
-    const isTransparent = (color: string) =>
-      !color ||
-      color === 'transparent' ||
-      color === 'rgba(0, 0, 0, 0)' ||
-      color === 'rgba(0,0,0,0)'
+    const applyText = (el: HTMLElement, color: string) => {
+      el.style.setProperty('color', color, 'important')
+      el.style.setProperty('-webkit-text-fill-color', color, 'important')
+      if (/caption|fuming|img-title|image-title|pic-title|tu-ti/i.test(el.className || '')) {
+        el.style.setProperty('opacity', '1', 'important')
+      }
+    }
 
-    const walk = (el: HTMLElement, depth: number) => {
+    const walk = (el: HTMLElement, depth: number, inheritedFg: string) => {
       if (depth > 8) return
       const tag = el.tagName.toLowerCase()
       if (isMedia(tag)) return
@@ -1649,34 +1636,41 @@ html body :has(> canvas):not(body) {
         kids.length > 0 &&
         kids.every((k) => isMedia(k.tagName.toLowerCase()) || k.tagName.toLowerCase() === 'br')
 
-      // Always force readable text color — figure captions sit under image wrappers
-      // that used to early-return (url background / media-only) and stayed publisher gray.
-      el.style.setProperty('color', fg, 'important')
-      el.style.setProperty('-webkit-text-fill-color', fg, 'important')
-      if (/caption|fuming|img-title|image-title|pic-title|tu-ti/i.test(el.className || '')) {
-        el.style.setProperty('opacity', '1', 'important')
-      }
+      let nextFg = inheritedFg
 
       if (urlBg || mediaOnly) {
-        el.style.setProperty('background-color', 'transparent', 'important')
-        // Still walk non-media kids (e.g. figcaption beside img under a decorated figure).
+        // Keep illustrations; still force readable text for sibling captions under the wrap.
+        applyText(el, inheritedFg)
         for (const child of kids) {
           if (!isMedia(child.tagName.toLowerCase()) && child.tagName.toLowerCase() !== 'br') {
-            walk(child, depth + 1)
+            walk(child, depth + 1, nextFg)
           }
         }
         return
       }
 
-      if (!isTransparent(cs.backgroundColor)) {
-        el.style.setProperty('background-color', bg, 'important')
+      const surfaceBg = cs.backgroundColor
+      if (!isTransparentCssColor(surfaceBg)) {
+        if (isDarkDecorativeBackground(surfaceBg)) {
+          // Black/dark caption bars: keep fill, switch to light glyphs.
+          const light = contrastTextForBackground(surfaceBg, fg, bg) || '#f4f1ea'
+          nextFg = light
+          applyText(el, light)
+        } else {
+          // Light / tinted publisher washes → theme page color + theme text.
+          el.style.setProperty('background-color', bg, 'important')
+          nextFg = fg
+          applyText(el, fg)
+        }
+      } else {
+        applyText(el, inheritedFg)
       }
 
-      for (const child of kids) walk(child, depth + 1)
+      for (const child of kids) walk(child, depth + 1, nextFg)
     }
 
     for (const child of Array.from(body.children)) {
-      if (child instanceof HTMLElement) walk(child, 0)
+      if (child instanceof HTMLElement) walk(child, 0, fg)
     }
   }
 
@@ -1752,6 +1746,7 @@ html body :has(> canvas):not(body) {
             body.style.setProperty('background-color', bg, 'important')
             body.style.setProperty('background-image', 'none', 'important')
             body.style.setProperty('color', fg, 'important')
+            this.paintPublisherWashes(doc, bg, fg)
           }
           this.paintHostSurfaces(doc, bg)
         } finally {
@@ -1860,36 +1855,37 @@ html body :has(> canvas):not(body) {
         {
           ...typeface,
           color: `${fg} !important`,
-          'background-color': `${bg} !important`,
         },
       'body p[class], body div[class], body li[class], body span[class], body td[class], body th[class], body blockquote[class], body section[class], body article[class], body figcaption[class], body caption[class], body [class*="caption"], body [class*="Caption"]':
         {
           color: `${fg} !important`,
-          'background-color': `${bg} !important`,
           opacity: '1 !important',
         },
       'img, picture, video, canvas': {
-        'max-width': '100% !important',
+        'max-width': '100vw !important',
         'max-height': '92vh !important',
         width: 'auto !important',
         height: 'auto !important',
         'object-fit': 'contain !important',
         'box-sizing': 'border-box !important',
         'background-color': 'transparent !important',
+        'break-inside': 'avoid !important',
+        '-webkit-column-break-inside': 'avoid !important',
       },
       svg: {
-        'max-width': '100% !important',
+        'max-width': '100vw !important',
         'max-height': '92vh !important',
         'box-sizing': 'border-box !important',
         'background-color': 'transparent !important',
+        'break-inside': 'avoid !important',
+        '-webkit-column-break-inside': 'avoid !important',
       },
       'div:has(> img), div:has(> svg), div:has(> picture), p:has(> img), p:has(> svg), figure': {
         'background-color': 'transparent !important',
-        color: `${fg} !important`,
-        'max-width': '100% !important',
+        'max-width': '100vw !important',
+        'box-sizing': 'border-box !important',
       },
       'figcaption, caption, [class*="caption"], [class*="image-title"], [class*="img-title"]': {
-        color: `${fg} !important`,
         opacity: '1 !important',
       },
       table: {
@@ -2000,36 +1996,58 @@ html body :has(> canvas):not(body) {
 
   /**
    * Fit media into the page/column box on phone/tablet/PC.
-   * Paginated columns clip overflow — tall bitmaps look "incomplete" without max-height.
-   * Never strip width/height attributes or force height:auto on SVG (1×1 collapse).
+   * Paginated CSS columns: max-width:100% resolves against the *expanded* multicol
+   * strip, so wide bitmaps spill into the next column ("第二页"). Cap with the
+   * iframe/page pixel width (≈ 100vw inside the chapter iframe) instead.
+   * Never strip width/height attributes on SVG (1×1 collapse).
    */
   private containOverflowMedia(doc: Document) {
     const maxH = this.mediaMaxHeightPx(doc)
+    const maxW = this.mediaMaxWidthPx(doc)
     const maxHCss = `${maxH}px`
+    const maxWCss = `${maxW}px`
 
-    doc.querySelectorAll('img, video, canvas').forEach((node) => {
-      if (!(node instanceof HTMLElement)) return
-      node.style.setProperty('max-width', '100%', 'important')
+    const fitBitmap = (node: HTMLElement) => {
+      node.style.setProperty('max-width', maxWCss, 'important')
       node.style.setProperty('max-height', maxHCss, 'important')
       node.style.setProperty('width', 'auto', 'important')
       node.style.setProperty('height', 'auto', 'important')
       node.style.setProperty('object-fit', 'contain', 'important')
       node.style.setProperty('box-sizing', 'border-box', 'important')
+      node.style.setProperty('break-inside', 'avoid', 'important')
+      node.style.setProperty('page-break-inside', 'avoid', 'important')
+      node.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
+    }
+
+    doc.querySelectorAll('img, video, canvas').forEach((node) => {
+      if (node instanceof HTMLElement) fitBitmap(node)
     })
 
     doc.querySelectorAll('picture').forEach((node) => {
       if (!(node instanceof HTMLElement)) return
-      node.style.setProperty('max-width', '100%', 'important')
+      node.style.setProperty('max-width', maxWCss, 'important')
       node.style.setProperty('max-height', maxHCss, 'important')
       node.style.setProperty('box-sizing', 'border-box', 'important')
+      node.style.setProperty('break-inside', 'avoid', 'important')
+      node.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
     })
 
     doc.querySelectorAll('svg').forEach((node) => {
       if (!(node instanceof SVGElement)) return
-      // Keep width/height attrs; only cap so vectors stay visible.
-      node.style.setProperty('max-width', '100%', 'important')
+      node.style.setProperty('max-width', maxWCss, 'important')
       node.style.setProperty('max-height', maxHCss, 'important')
       node.style.setProperty('box-sizing', 'border-box', 'important')
+      node.style.setProperty('break-inside', 'avoid', 'important')
+      node.style.setProperty('-webkit-column-break-inside', 'avoid', 'important')
+    })
+
+    // Wrappers with fixed publisher widths still push the column strip wider.
+    doc.querySelectorAll('div, p, figure, span, center').forEach((node) => {
+      if (!(node instanceof HTMLElement)) return
+      if (!node.querySelector(':scope > img, :scope > picture, :scope > svg, :scope > video')) return
+      node.style.setProperty('max-width', maxWCss, 'important')
+      node.style.setProperty('box-sizing', 'border-box', 'important')
+      node.style.setProperty('overflow-x', 'hidden', 'important')
     })
 
     // Do not force iframe/body width in paginated mode — that collapses epub.js multi-page expand.
@@ -2061,6 +2079,23 @@ html body :has(> canvas):not(body) {
     } catch {
       /* ignore */
     }
+  }
+
+  /** Single-page / column content width in px (not the expanded multicol strip). */
+  private mediaMaxWidthPx(doc: Document): number {
+    const win = doc.defaultView
+    let w = 0
+    if (win && win.innerWidth > 0) w = win.innerWidth
+    if (!w && this.container) {
+      const scroller = this.container.querySelector('.epub-container') as HTMLElement | null
+      w = scroller?.clientWidth || this.container.clientWidth
+    }
+    if (!w) w = typeof window !== 'undefined' ? window.innerWidth : 360
+    // Dual spread: two pages share the view — each column is about half.
+    if (this.settings && this.isDualSpread(this.settings)) {
+      w = Math.max(120, Math.floor((w - 40) / 2))
+    }
+    return Math.max(64, Math.floor(w * 0.96))
   }
 
   /** Page box height for media fit (iframe viewport ≈ one column / screen). */
