@@ -15,6 +15,8 @@ import {
   isSvgGeometryElement,
   isSvgSvgElement,
   isTransparentCssColor,
+  parseCssColor,
+  relativeLuminance,
   resolveSurfaceBackgroundCss,
   resolveSvgTextFill,
   shouldLightenSvgGlyphShape,
@@ -1625,13 +1627,10 @@ html body th[data-qy-on-dark='1'] {
   -webkit-text-fill-color: ${lightOnDark} !important;
   opacity: 1 !important;
 }
-/* Overlay titles: no cream/white full-bleed plate behind black capsules. */
+/* Overlay titles: shrink full-bleed only. Never wipe black/url capsules via stylesheet. */
 html body [data-qy-clear-plate='1'],
 html body [data-qy-clear-plate='1'][class],
 html body [data-qy-clear-plate='1'][style] {
-  background-color: transparent !important;
-  background-image: none !important;
-  box-shadow: none !important;
   width: auto !important;
   max-width: 100% !important;
 }
@@ -1751,14 +1750,27 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       } else delete el.dataset.qyOnDark
     }
 
-    /** Kill cream/white full-bleed plates behind black title pills (titleReset width:100% + light wash). */
-    const clearLightPlate = (el: HTMLElement) => {
-      el.style.setProperty('background-color', 'transparent', 'important')
-      el.style.setProperty('background-image', 'none', 'important')
-      el.style.setProperty('box-shadow', 'none', 'important')
+    /** Strip only light cream/white full-bleed plates — never touch black / url() title bars. */
+    const clearLightPlate = (el: HTMLElement, cs: CSSStyleDeclaration) => {
+      const bi = cs.backgroundImage || ''
+      if (bi && bi !== 'none' && /url\(/i.test(bi) && !/gradient\(/i.test(bi)) {
+        el.style.setProperty('width', 'auto', 'important')
+        el.style.setProperty('max-width', '100%', 'important')
+        el.dataset.qyClearPlate = '1'
+        return
+      }
+      const surface = resolveSurfaceBackgroundCss(el, cs, win)
+      if (isDarkSurfaceCss(surface)) return
+      if (surface && !isTransparentCssColor(surface)) {
+        const rgb = parseCssColor(surface)
+        const L = rgb ? relativeLuminance(rgb.r, rgb.g, rgb.b) : 0
+        if (L > 0.55) {
+          el.style.setProperty('background-color', 'transparent', 'important')
+          el.dataset.qyClearPlate = '1'
+        }
+      }
       el.style.setProperty('width', 'auto', 'important')
       el.style.setProperty('max-width', '100%', 'important')
-      el.dataset.qyClearPlate = '1'
     }
 
     const hostsFigureOrDarkPill = (el: HTMLElement, kids: HTMLElement[]) => {
@@ -1801,7 +1813,6 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       let nextDark = underDark
 
       if (urlIllust || mediaOnly) {
-        // url(...) black title bars: no solid background-color → old wash kept theme-dark text.
         const short =
           ((el.textContent || '').replace(/\s+/g, '').trim().length <= 24 &&
             (el.textContent || '').replace(/\s+/g, '').trim().length > 0) ||
@@ -1810,10 +1821,9 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
           nextFg = lightOnDark
           nextDark = true
           applyText(el, lightOnDark, true)
-          // url bar is the dark plate — keep it; don't add an extra light wash plate.
         } else if (titleLike || short) {
           applyText(el, inheritedFg, false)
-          clearLightPlate(el)
+          clearLightPlate(el, cs)
         } else {
           applyText(el, inheritedFg, false)
         }
@@ -1831,10 +1841,8 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
           nextFg = light
           nextDark = true
           applyText(el, light, true)
-          // Keep publisher dark fill (don't wash to page bg).
         } else if (hostsFigureOrDarkPill(el, kids)) {
-          // Figure stacks: no cream full-width bar behind the black capsule.
-          clearLightPlate(el)
+          clearLightPlate(el, cs)
           nextFg = fg
           nextDark = false
           applyText(el, fg, false)
@@ -1849,21 +1857,21 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         nextDark = true
         nextFg = lightOnDark
       } else if (
-        // Transparent title over sibling absolute black pill / SVG capsule.
         elementOverlapsDarkBackdrop(el, win) &&
         ((el.textContent || '').replace(/\s+/g, '').trim().length <= 24 || titleLike)
       ) {
         nextFg = lightOnDark
         nextDark = true
         applyText(el, lightOnDark, true)
-        clearLightPlate(el)
+        el.style.setProperty('width', 'auto', 'important')
+        el.style.setProperty('max-width', '100%', 'important')
       } else if (titleLike) {
         const inline = el.getAttribute('style') || ''
         const looksBlack =
           /background(-color)?\s*:\s*(#0{3,8}|black|rgb\(\s*0\s*,\s*0\s*,\s*0)/i.test(inline) ||
           /^(#0{3,8}|black)$/i.test(el.getAttribute('bgcolor') || '')
         const nearFigure = !!el.parentElement?.querySelector('img, svg, picture, object')
-        if (looksBlack) {
+        if (looksBlack || darkSurface) {
           nextFg = lightOnDark
           nextDark = true
           applyText(el, lightOnDark, true)
@@ -1871,7 +1879,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
           nextFg = lightOnDark
           nextDark = true
           applyText(el, lightOnDark, true)
-          clearLightPlate(el)
+          clearLightPlate(el, cs)
         } else {
           applyText(el, inheritedFg, underDark)
         }

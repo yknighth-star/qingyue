@@ -171,6 +171,7 @@ try {
       solid: cs(solid),
       abs: cs(abs),
       absBg: bg(abs),
+      solidBg: bg(solid),
       wrapBg: bg(wrap),
       solidOnDark: solid?.dataset?.qyOnDark || null,
       absOnDark: abs?.dataset?.qyOnDark || null,
@@ -193,6 +194,10 @@ try {
   assert(colors.themeStyle, 'qingyue-theme injected')
   assert(isWhite(colors.solid), `solid black bar title is white (got ${colors.solid})`)
   assert(isWhite(colors.abs), `absolute overlay title is white (got ${colors.abs})`)
+  assert(
+    /0,\s*0,\s*0|rgb\(0,\s*0,\s*0\)/i.test(String(colors.solidBg || '')),
+    `solid title keeps black capsule (bg=${colors.solidBg})`,
+  )
   assert(
     isTransparent(colors.absBg),
     `overlay title has no light plate (bg=${colors.absBg})`,

@@ -594,17 +594,31 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
     el.style.setProperty('-webkit-text-fill-color', WHITE, 'important')
     el.style.setProperty('opacity', '1', 'important')
     el.dataset.qyOnDark = '1'
-    // Overlay on dark img/svg/sibling — don't leave a light full-bleed plate.
+    // Overlay on dark sibling/img: shrink bleed. Never strip url()/dark fills.
     try {
       const cs = win!.getComputedStyle(el)
-      const surface = resolveSurfaceBackgroundCss(el, cs, win)
-      if (!isDarkSurfaceCss(surface)) {
-        el.style.setProperty('background-color', 'transparent', 'important')
-        el.style.setProperty('background-image', 'none', 'important')
-        el.style.setProperty('box-shadow', 'none', 'important')
+      const bi = cs.backgroundImage || ''
+      if (bi && bi !== 'none' && /url\(/i.test(bi) && !/gradient\(/i.test(bi)) {
         el.style.setProperty('width', 'auto', 'important')
-        el.dataset.qyClearPlate = '1'
+        el.style.setProperty('max-width', '100%', 'important')
+        fixed++
+        return
       }
+      const surface = resolveSurfaceBackgroundCss(el, cs, win)
+      if (isDarkSurfaceCss(surface)) {
+        fixed++
+        return
+      }
+      if (surface && !isTransparentCssColor(surface)) {
+        const rgb = parseCssColor(surface)
+        const L = rgb ? relativeLuminance(rgb.r, rgb.g, rgb.b) : 0
+        if (L > 0.55) {
+          el.style.setProperty('background-color', 'transparent', 'important')
+          el.dataset.qyClearPlate = '1'
+        }
+      }
+      el.style.setProperty('width', 'auto', 'important')
+      el.style.setProperty('max-width', '100%', 'important')
     } catch {
       /* */
     }
