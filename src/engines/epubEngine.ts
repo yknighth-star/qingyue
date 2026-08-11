@@ -3,23 +3,19 @@ import type { AnnotationRecord, Locator, PageTurnMode, ReaderSettings, SearchHit
 import { applyThemeVars, effectiveTheme, DUAL_COLUMN_MIN_WIDTH, THEME_VARS } from '@/utils/format'
 import {
   LIGHT_ON_DARK_FG,
+  applyShortLabelContrast,
   collectSvgTitleBands,
-  contrastTextForBackground,
-  elementOverlapsDarkBackdrop,
-  forceShortLabelsOnDarkBackdrop,
   isDarkDecorativeBackground,
   isDarkSurfaceCss,
   isFigureTitleChrome,
-  isFigureTitleLike,
   isHtmlElement,
   isSvgGeometryElement,
   isSvgSvgElement,
   isTransparentCssColor,
-  parseCssColor,
-  relativeLuminance,
   resolveSurfaceBackgroundCss,
   resolveSvgTextFill,
   shouldLightenSvgGlyphShape,
+  urlBackgroundLikelyTitleBar,
 } from '@/utils/colorContrast'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
@@ -1627,13 +1623,6 @@ html body th[data-qy-on-dark='1'] {
   -webkit-text-fill-color: ${lightOnDark} !important;
   opacity: 1 !important;
 }
-/* Overlay titles: shrink full-bleed only. Never wipe black/url capsules via stylesheet. */
-html body [data-qy-clear-plate='1'],
-html body [data-qy-clear-plate='1'][class],
-html body [data-qy-clear-plate='1'][style] {
-  width: auto !important;
-  max-width: 100% !important;
-}
 /* Only mark SVG nodes explicitly — never fill:* under HTML parents (bleaches diagram labels). */
 html body svg text[data-qy-on-dark='1'],
 html body svg text[data-qy-on-dark='1'] tspan,
@@ -1750,44 +1739,12 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       } else delete el.dataset.qyOnDark
     }
 
-    /** Strip only light cream/white full-bleed plates — never touch black / url() title bars. */
-    const clearLightPlate = (el: HTMLElement, cs: CSSStyleDeclaration) => {
-      const bi = cs.backgroundImage || ''
-      if (bi && bi !== 'none' && /url\(/i.test(bi) && !/gradient\(/i.test(bi)) {
-        el.style.setProperty('width', 'auto', 'important')
-        el.style.setProperty('max-width', '100%', 'important')
-        el.dataset.qyClearPlate = '1'
-        return
-      }
-      const surface = resolveSurfaceBackgroundCss(el, cs, win)
-      if (isDarkSurfaceCss(surface)) return
-      if (surface && !isTransparentCssColor(surface)) {
-        const rgb = parseCssColor(surface)
-        const L = rgb ? relativeLuminance(rgb.r, rgb.g, rgb.b) : 0
-        if (L > 0.55) {
-          el.style.setProperty('background-color', 'transparent', 'important')
-          el.dataset.qyClearPlate = '1'
-        }
-      }
-      el.style.setProperty('width', 'auto', 'important')
-      el.style.setProperty('max-width', '100%', 'important')
-    }
-
-    const hostsFigureOrDarkPill = (el: HTMLElement, kids: HTMLElement[]) => {
-      if (isFigureTitleChrome(el) || isFigureTitleLike(el)) return true
-      if (el.querySelector(':scope > img, :scope > svg, :scope > picture, :scope > object')) return true
-      for (const k of kids) {
-        try {
-          const s = resolveSurfaceBackgroundCss(k, win.getComputedStyle(k), win)
-          if (isDarkSurfaceCss(s)) return true
-        } catch {
-          /* */
-        }
-      }
-      return false
-    }
-
-    const walk = (el: HTMLElement, depth: number, inheritedFg: string, underDark: boolean) => {
+    /**
+     * Background wash only. Short-label glyph colors are decided once by
+     * applyShortLabelContrast (no titleLike / force / reconcile fight).
+     * underDark propagates only from own solid dark fill or full-bleed url bar.
+     */
+    const walk = (el: HTMLElement, depth: number, underDark: boolean) => {
       if (depth > 14) return
       const tag = el.tagName.toLowerCase()
       if (isMedia(tag)) return
@@ -1802,34 +1759,23 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
 
       const kids = Array.from(el.children).filter((n) => isHtmlElement(n)) as HTMLElement[]
       const urlIllust = hasUrlIllustration(el, cs)
-      const mediaOnly =
-        kids.length > 0 &&
-        kids.every((k) => isMedia(k.tagName.toLowerCase()) || k.tagName.toLowerCase() === 'br')
-      const titleLike = isFigureTitleLike(el)
-      const surface = resolveSurfaceBackgroundCss(el, cs, win)
+      const rect = el.getBoundingClientRect()
+      const surface = resolveSurfaceBackgroundCss(el, cs, win, { ignorePseudos: true })
       const darkSurface = isDarkSurfaceCss(surface)
+      const urlBar = urlIllust && urlBackgroundLikelyTitleBar(cs, rect)
 
-      let nextFg = inheritedFg
       let nextDark = underDark
 
-      if (urlIllust || mediaOnly) {
-        const short =
-          ((el.textContent || '').replace(/\s+/g, '').trim().length <= 24 &&
-            (el.textContent || '').replace(/\s+/g, '').trim().length > 0) ||
-          titleLike
-        if (darkSurface || (urlIllust && short) || underDark) {
-          nextFg = lightOnDark
+      if (urlIllust || (kids.length > 0 && kids.every((k) => isMedia(k.tagName.toLowerCase()) || k.tagName.toLowerCase() === 'br'))) {
+        if (darkSurface || urlBar || underDark) {
           nextDark = true
           applyText(el, lightOnDark, true)
-        } else if (titleLike || short) {
-          applyText(el, inheritedFg, false)
-          clearLightPlate(el, cs)
         } else {
-          applyText(el, inheritedFg, false)
+          applyText(el, fg, false)
         }
         for (const child of kids) {
           if (!isMedia(child.tagName.toLowerCase()) && child.tagName.toLowerCase() !== 'br') {
-            walk(child, depth + 1, nextFg, nextDark)
+            walk(child, depth + 1, nextDark)
           }
         }
         return
@@ -1837,84 +1783,31 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
 
       if (surface && !isTransparentCssColor(surface)) {
         if (isDarkDecorativeBackground(surface) || darkSurface) {
-          const light = contrastTextForBackground(surface, fg, bg) || lightOnDark
-          nextFg = light
           nextDark = true
-          applyText(el, light, true)
-        } else if (hostsFigureOrDarkPill(el, kids)) {
-          clearLightPlate(el, cs)
-          nextFg = fg
-          nextDark = false
-          applyText(el, fg, false)
+          applyText(el, lightOnDark, true)
+          // Keep publisher dark fill.
         } else {
           el.style.setProperty('background-color', bg, 'important')
-          nextFg = fg
           nextDark = false
           applyText(el, fg, false)
         }
-      } else if (titleLike && underDark) {
-        applyText(el, inheritedFg === fg ? lightOnDark : inheritedFg, true)
-        nextDark = true
-        nextFg = lightOnDark
-      } else if (
-        elementOverlapsDarkBackdrop(el, win) &&
-        ((el.textContent || '').replace(/\s+/g, '').trim().length <= 24 || titleLike)
-      ) {
-        nextFg = lightOnDark
+      } else if (urlBar) {
         nextDark = true
         applyText(el, lightOnDark, true)
-        el.style.setProperty('width', 'auto', 'important')
-        el.style.setProperty('max-width', '100%', 'important')
-      } else if (titleLike) {
-        const inline = el.getAttribute('style') || ''
-        const looksBlack =
-          /background(-color)?\s*:\s*(#0{3,8}|black|rgb\(\s*0\s*,\s*0\s*,\s*0)/i.test(inline) ||
-          /^(#0{3,8}|black)$/i.test(el.getAttribute('bgcolor') || '')
-        const nearFigure = !!el.parentElement?.querySelector('img, svg, picture, object')
-        if (looksBlack || darkSurface) {
-          nextFg = lightOnDark
-          nextDark = true
-          applyText(el, lightOnDark, true)
-        } else if (nearFigure) {
-          nextFg = lightOnDark
-          nextDark = true
-          applyText(el, lightOnDark, true)
-          clearLightPlate(el, cs)
-        } else {
-          applyText(el, inheritedFg, underDark)
-        }
       } else {
-        applyText(el, inheritedFg, underDark)
+        applyText(el, underDark ? lightOnDark : fg, underDark)
       }
 
-      for (const child of kids) walk(child, depth + 1, nextFg, nextDark)
+      for (const child of kids) walk(child, depth + 1, nextDark)
     }
 
     for (const child of Array.from(body.children)) {
-      if (isHtmlElement(child)) walk(child, 0, fg, false)
+      if (isHtmlElement(child)) walk(child, 0, false)
     }
 
-    // Hard pass: short labels on dark img/svg/url pills (no class heuristics).
-    marked += forceShortLabelsOnDarkBackdrop(doc, fg)
-
-    // Last-resort scan: any element with a dark computed background gets white text.
-    // Catches cases the tree walk missed (epub.js reparenting / late class styles).
-    // CRITICAL: must use isHtmlElement — parent `instanceof HTMLElement` is false in iframes.
-    doc.querySelectorAll('p, div, span, h1, h2, h3, h4, h5, h6, figcaption, caption, center, li, td, th').forEach(
-      (node) => {
-        if (!isHtmlElement(node)) return
-        if (node.dataset.qyOnDark === '1') return
-        let cs: CSSStyleDeclaration
-        try {
-          cs = win.getComputedStyle(node)
-        } catch {
-          return
-        }
-        const surface = resolveSurfaceBackgroundCss(node, cs, win)
-        if (!isDarkSurfaceCss(surface)) return
-        applyText(node, lightOnDark, true)
-      },
-    )
+    // ONE definitive short-label pass: dark capsule → white; cream → theme fg.
+    const labelPass = applyShortLabelContrast(doc, fg)
+    marked += labelPass.whitened
 
     body.dataset.qyWashMarked = String(marked)
 
@@ -2013,7 +1906,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
   private scheduleSvgContrastRetries(doc: Document, light: string, dark: string) {
     const run = () => {
       if (!doc.defaultView || doc.defaultView.closed) return
-      forceShortLabelsOnDarkBackdrop(doc, dark)
+      applyShortLabelContrast(doc, dark)
       this.paintSvgTextContrast(doc, light, dark)
     }
     try {

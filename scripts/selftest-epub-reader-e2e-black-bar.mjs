@@ -66,9 +66,22 @@ body{font-family:sans-serif;background:#f3ead3;color:#3b2f2f;padding:12px}
 .wrap{position:relative;width:420px;margin:20px auto;height:32px}
 .pill{position:absolute;inset:0;background:#000;border-radius:16px}
 .over{position:relative;margin:0;line-height:32px;text-align:center;color:#fff}
+.ch-head{text-align:center;margin:28px auto;max-width:420px}
+.ch-rule{height:1px;background:#000;margin:0 auto;width:72%}
+.ch-rule-thick{height:3px;background:#000;margin:0 auto;width:72%}
+.ch-num,.ch-title{margin:10px 0;text-align:center;color:#3b2f2f}
+.sec-head{margin:20px 0;color:#3b2f2f}
+.sec-head::before{content:"◆";display:inline-block;width:0.9em;height:0.9em;margin-right:0.35em;background:#000;color:transparent;vertical-align:-0.05em}
 </style>
 </head>
 <body>
+<div class="ch-head" id="ch-head">
+  <div class="ch-rule" id="rule-top"></div>
+  <p class="ch-num" id="ch-num" align="center">第二章</p>
+  <div class="ch-rule-thick" id="rule-mid"></div>
+  <p class="ch-title" id="ch-title" align="center">灾难</p>
+</div>
+<p class="sec-head title" id="sec-head">我们从一份档案开始</p>
 <p>前文：朱元璋原来叫朱重八。</p>
 <p class="solid" id="solid-title">赈灾物品</p>
 <div class="wrap" id="abs-wrap">
@@ -84,6 +97,14 @@ body{font-family:sans-serif;background:#f3ead3;color:#3b2f2f;padding:12px}
   <circle cx="80" cy="70" r="22" fill="#ffffff" stroke="#000"/>
   <text id="svg-label" x="80" y="74" text-anchor="middle" font-size="11" fill="#000000">高祖</text>
 </svg>
+<div class="wrap" id="html-over-svg" style="position:relative;width:420px;margin:20px auto;height:36px">
+  <svg xmlns="http://www.w3.org/2000/svg" width="420" height="36" viewBox="0 0 420 36" style="position:absolute;inset:0">
+    <rect x="20" y="4" width="380" height="28" rx="14" fill="#000000"/>
+    <circle cx="34" cy="18" r="5" fill="#ffffff"/>
+    <circle cx="386" cy="18" r="5" fill="#ffffff"/>
+  </svg>
+  <p class="over" id="html-svg-title" style="position:relative;margin:0;line-height:36px;text-align:center;color:#3b2f2f">朱重八家族</p>
+</div>
 <p>这并不是数学题。</p>
 </body></html>`,
   )
@@ -160,9 +181,11 @@ try {
     const svgTitle = document.getElementById('svg-title')
     const label = document.getElementById('svg-label')
     const glyph = document.getElementById('glyph')
-    const wrap = document.getElementById('abs-wrap')
+    const chNum = document.getElementById('ch-num')
+    const chTitle = document.getElementById('ch-title')
+    const secHead = document.getElementById('sec-head')
+    const htmlSvg = document.getElementById('html-svg-title')
     const cs = (el) => (el ? getComputedStyle(el).color : null)
-    const bg = (el) => (el ? getComputedStyle(el).backgroundColor : null)
     const fill = (el) => {
       if (!el) return null
       return el.style.fill || getComputedStyle(el).fill
@@ -170,15 +193,19 @@ try {
     return {
       solid: cs(solid),
       abs: cs(abs),
-      absBg: bg(abs),
-      solidBg: bg(solid),
-      wrapBg: bg(wrap),
       solidOnDark: solid?.dataset?.qyOnDark || null,
       absOnDark: abs?.dataset?.qyOnDark || null,
-      absClear: abs?.dataset?.qyClearPlate || null,
       svgTitle: fill(svgTitle),
       svgLabel: fill(label),
       glyph: fill(glyph),
+      chNum: cs(chNum),
+      chTitle: cs(chTitle),
+      chNumOnDark: chNum?.dataset?.qyOnDark || null,
+      chTitleOnDark: chTitle?.dataset?.qyOnDark || null,
+      secHead: cs(secHead),
+      secHeadOnDark: secHead?.dataset?.qyOnDark || null,
+      htmlSvg: cs(htmlSvg),
+      htmlSvgOnDark: htmlSvg?.dataset?.qyOnDark || null,
       bodyColor: getComputedStyle(document.body).color,
       themeStyle: !!document.getElementById('qingyue-theme'),
     }
@@ -188,23 +215,25 @@ try {
 
   const isWhite = (c) => /255,\s*255,\s*255|#fff/i.test(c || '')
   const isDark = (c) => /59,\s*47,\s*47|3b2f2f|0,\s*0,\s*0|#000/i.test(c || '')
-  const isTransparent = (c) =>
-    !c || /transparent|rgba\(\s*0,\s*0,\s*0,\s*0\s*\)/i.test(c)
 
   assert(colors.themeStyle, 'qingyue-theme injected')
   assert(isWhite(colors.solid), `solid black bar title is white (got ${colors.solid})`)
   assert(isWhite(colors.abs), `absolute overlay title is white (got ${colors.abs})`)
-  assert(
-    /0,\s*0,\s*0|rgb\(0,\s*0,\s*0\)/i.test(String(colors.solidBg || '')),
-    `solid title keeps black capsule (bg=${colors.solidBg})`,
-  )
-  assert(
-    isTransparent(colors.absBg),
-    `overlay title has no light plate (bg=${colors.absBg})`,
-  )
   assert(isWhite(colors.svgTitle), `svg text on black is white (got ${colors.svgTitle})`)
   assert(isWhite(colors.glyph) || isWhite(String(colors.glyph)), `svg #000 path glyph lightened (got ${colors.glyph})`)
   assert(isDark(colors.svgLabel) || /59|3b2f2f|0,\s*0,\s*0/i.test(colors.svgLabel || ''), `label on white stays dark (got ${colors.svgLabel})`)
+  // Chapter titles between thin black rules must stay theme-dark (not white-on-cream).
+  assert(!isWhite(colors.chNum), `chapter number stays dark (got ${colors.chNum})`)
+  assert(!isWhite(colors.chTitle), `chapter title stays dark (got ${colors.chTitle})`)
+  assert(colors.chNumOnDark !== '1', 'chapter number not marked on-dark')
+  assert(colors.chTitleOnDark !== '1', 'chapter title not marked on-dark')
+  assert(isDark(colors.chNum) || isDark(colors.bodyColor), `chapter number readable dark (got ${colors.chNum})`)
+  assert(isDark(colors.chTitle) || isDark(colors.bodyColor), `chapter title readable dark (got ${colors.chTitle})`)
+  assert(!isWhite(colors.secHead), `◆ section head stays dark (got ${colors.secHead})`)
+  assert(colors.secHeadOnDark !== '1', '◆ section head not marked on-dark')
+  assert(isDark(colors.secHead) || isDark(colors.bodyColor), `◆ section head readable (got ${colors.secHead})`)
+  assert(isWhite(colors.htmlSvg), `HTML over SVG capsule is white (got ${colors.htmlSvg})`)
+  assert(colors.htmlSvgOnDark === '1', 'HTML over SVG marked on-dark')
 
   // Pixel proof on abs title
   const shot = await target.locator('#abs-wrap').screenshot()

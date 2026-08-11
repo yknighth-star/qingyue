@@ -186,7 +186,7 @@ export function isDarkDecorativeBackground(backgroundCss: string): boolean {
 }
 
 const TITLE_CLASS_RE =
-  /caption|fuming|img-title|image-title|pic-title|tu-ti|title|biaoti|btitle|chapter-title|kindle-cn/i
+  /caption|fuming|img-title|image-title|pic-title|tu-ti|biaoti|btitle|chapter-title|kindle-cn-title|titlepage|\btitle\b/i
 
 /** Figure/section title bars that commonly sit on black pills in CN EPUBs. */
 export function isFigureTitleLike(el: Element): boolean {
@@ -223,13 +223,15 @@ export function colorsFromBackgroundImage(backgroundImage: string): string[] {
 
 /**
  * Effective surface color for contrast decisions.
- * Prefers opaque background-color; falls back to dark gradient stops / bgcolor attr /
- * ::before/::after solid fills (common CN EPUB title bars).
+ * Prefers opaque background-color; falls back to dark gradient stops / bgcolor attr.
+ * ::before/::after only when they cover a large fraction of the element (full title bars),
+ * never tiny ◆ bullets — pass `ignorePseudos: true` for wash / short-label decisions.
  */
 export function resolveSurfaceBackgroundCss(
   el: HTMLElement,
   cs: CSSStyleDeclaration,
   win?: Window | null,
+  opts?: { ignorePseudos?: boolean },
 ): string | null {
   const solid = cs.backgroundColor
   if (!isTransparentCssColor(solid)) return solid
@@ -246,28 +248,82 @@ export function resolveSurfaceBackgroundCss(
   for (const c of fromGrad) {
     if (isDarkDecorativeBackground(c)) return c
   }
-  // Any opaque gradient stop counts as a surface hint.
   for (const c of fromGrad) {
     if (!isTransparentCssColor(c)) return c
   }
 
-  if (win) {
-    for (const pseudo of ['::before', '::after'] as const) {
-      try {
-        const pcs = win.getComputedStyle(el, pseudo)
-        if (!pcs || pcs.content === 'none' || pcs.content === 'normal') continue
-        const pbg = pcs.backgroundColor
-        if (!isTransparentCssColor(pbg)) return pbg
-        for (const c of colorsFromBackgroundImage(pcs.backgroundImage)) {
-          if (isDarkDecorativeBackground(c)) return c
+  if (opts?.ignorePseudos || !win) return null
+
+  let elBox: DOMRect | null = null
+  try {
+    elBox = el.getBoundingClientRect()
+  } catch {
+    elBox = null
+  }
+  for (const pseudo of ['::before', '::after'] as const) {
+    try {
+      const pcs = win.getComputedStyle(el, pseudo)
+      if (!pcs || pcs.content === 'none' || pcs.content === 'normal') continue
+      if (elBox && elBox.width > 0 && elBox.height > 0) {
+        const pw = Number.parseFloat(pcs.width) || 0
+        const ph = Number.parseFloat(pcs.height) || 0
+        if (pw > 0 && ph > 0) {
+          const cover = (pw * ph) / (elBox.width * elBox.height)
+          if (cover < 0.35) continue
+        } else {
+          continue
         }
-      } catch {
-        /* */
+      } else {
+        continue
       }
+      const pbg = pcs.backgroundColor
+      if (!isTransparentCssColor(pbg)) return pbg
+      for (const c of colorsFromBackgroundImage(pcs.backgroundImage)) {
+        if (isDarkDecorativeBackground(c)) return c
+      }
+    } catch {
+      /* */
     }
   }
 
   return null
+}
+
+/**
+ * True when background-image:url(...) likely paints a full title bar / capsule,
+ * not a small left bullet icon.
+ *
+ * Real CN EPUB pattern (明朝 p_title): light/white background-color + url(blob)
+ * black capsule image. background-size is often auto/no-repeat — must still count.
+ */
+export function urlBackgroundLikelyTitleBar(cs: CSSStyleDeclaration, rect: DomRectLike): boolean {
+  const bi = (cs.backgroundImage || '').trim()
+  if (!bi || bi === 'none' || !/url\(/i.test(bi) || /gradient\(/i.test(bi)) return false
+  const size = (cs.backgroundSize || '').trim().toLowerCase()
+  const repeat = (cs.backgroundRepeat || '').toLowerCase()
+  if (size === 'cover' || size === 'contain') return true
+  if (/(^|\s)100%\s+100%($|\s)/.test(size) || size === '100%') return true
+  const pxPair = size.match(/([\d.]+)\s*px\s+([\d.]+)\s*px/)
+  if (pxPair) {
+    const w = Number.parseFloat(pxPair[1])
+    const h = Number.parseFloat(pxPair[2])
+    // Tiny bullet icon
+    if (w <= 32 && h <= 32) return false
+    if (w >= rect.width * 0.5 && h >= Math.max(12, rect.height * 0.45)) return true
+  }
+  if (repeat.includes('repeat-x') && rect.height > 0 && rect.height <= 96) return true
+  // Explicit small single-token size (14px / 1em) + no-repeat → bullet
+  if (repeat.includes('no-repeat')) {
+    const one = size.match(/^([\d.]+)(px|em)$/)
+    if (one) {
+      const n = Number.parseFloat(one[1])
+      if (one[2] === 'px' && n <= 32) return false
+      if (one[2] === 'em' && n <= 2) return false
+    }
+  }
+  // Title-row geometry + any url: treat as capsule (covers auto-sized blob bars).
+  if (rect.width >= 80 && rect.height > 0 && rect.height <= 96) return true
+  return false
 }
 
 export function isDarkSurfaceCss(surfaceCss: string | null): boolean {
@@ -476,6 +532,33 @@ export function shouldLightenSvgGlyphShape(opts: {
 }
 
 /**
+ * Thin full-bleed black lines under chapter titles (「第二章」) are NOT title capsules.
+ * Treating them as dark backdrops forced white text onto cream page bg.
+ */
+export function isThinDecorativeRule(r: DomRectLike, textHeight = 0): boolean {
+  if (r.height < 1 || r.width < 1) return true
+  if (r.height <= 12) return true
+  if (textHeight > 0 && r.height < textHeight * 0.45 && r.width > r.height * 8) return true
+  if (r.width > r.height * 12 && r.height < 20) return true
+  return false
+}
+
+/**
+ * Media that sits next to a caption — not "any img later in the chapter".
+ * Parent.querySelector('img') falsely whitened every short title in the section.
+ */
+export function hasAdjacentFigureMedia(el: Element): boolean {
+  const check = (sib: Element | null) => {
+    if (!sib) return false
+    const tag = sib.tagName.toLowerCase()
+    if (tag === 'img' || tag === 'svg' || tag === 'picture' || tag === 'object') return true
+    if (sib.querySelector(':scope > img, :scope > svg, :scope > picture, :scope > object')) return true
+    return false
+  }
+  return check(el.previousElementSibling) || check(el.nextElementSibling)
+}
+
+/**
  * HTML title sitting on a sibling/absolute dark pill (common CN EPUB pattern):
  *   <div style="position:relative">
  *     <div style="position:absolute;background:#000"></div>
@@ -490,13 +573,16 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
 
   const cx = rect.left + rect.width / 2
   const cy = rect.top + rect.height / 2
+  const textH = rect.height
 
   const imgDarkAt = (img: HTMLImageElement): boolean => {
     try {
       const r = img.getBoundingClientRect()
+      if (isThinDecorativeRule(r, textH)) return false
       if (r.width < 1 || r.height < 1 || !img.naturalWidth) {
-        // Overlapping an image with a short label — treat as dark bar candidate.
-        return true
+        // Overlapping an image with a short label — treat as dark bar candidate
+        // only when tall enough to be a capsule, not a 1px rule bitmap.
+        return r.height >= Math.max(16, textH * 0.5)
       }
       const canvas = el.ownerDocument.createElement('canvas')
       canvas.width = 1
@@ -521,11 +607,12 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
     for (const sib of Array.from(parent.children)) {
       if (!isHtmlElement(sib) || sib === node) continue
       const tag = sib.tagName.toLowerCase()
-      if (tag === 'script' || tag === 'style' || tag === 'br') continue
+      if (tag === 'script' || tag === 'style' || tag === 'br' || tag === 'hr') continue
 
-      if (tag === 'img' && (sib as HTMLImageElement).naturalWidth !== undefined && sib.tagName.toLowerCase() === 'img') {
+      if (tag === 'img') {
         const img = sib as HTMLImageElement
         const sr = img.getBoundingClientRect()
+        if (isThinDecorativeRule(sr, textH)) continue
         if (cx >= sr.left && cx <= sr.right && cy >= sr.top && cy <= sr.bottom) {
           if (imgDarkAt(img)) return true
         } else if (rectsOverlap(rect, sr, 0.35) && imgDarkAt(img)) {
@@ -537,6 +624,7 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
       // SVG sibling: hit-test dark shapes in svg user space via screen bbox of svg.
       if (tag === 'svg' && isSvgSvgElement(sib)) {
         const sr = sib.getBoundingClientRect()
+        if (isThinDecorativeRule(sr, textH)) continue
         if (!rectsOverlap(rect, sr, 0.15)) continue
         try {
           const vb = sib.viewBox?.baseVal
@@ -564,10 +652,14 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
       } catch {
         continue
       }
-      const surface = resolveSurfaceBackgroundCss(sib, cs, win)
+      const surface = resolveSurfaceBackgroundCss(sib, cs, win, { ignorePseudos: true })
       if (!isDarkSurfaceCss(surface)) continue
       const sr = sib.getBoundingClientRect()
       if (sr.width < 1 || sr.height < 1) continue
+      // Chapter title rules: full-width 1–3px black lines — ignore.
+      if (isThinDecorativeRule(sr, textH)) continue
+      // Real title capsules are at least ~half the text height.
+      if (sr.height < Math.max(16, textH * 0.5)) continue
       // Center of title over dark layer is enough (pill often wider than text).
       if (cx >= sr.left && cx <= sr.right && cy >= sr.top && cy <= sr.bottom) return true
       if (rectsOverlap(rect, sr, 0.4)) return true
@@ -577,63 +669,93 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
   return false
 }
 
+function ownShortLabelText(el: HTMLElement): string {
+  let own = ''
+  for (const n of Array.from(el.childNodes)) {
+    if (n.nodeType === 3) own += n.textContent || ''
+  }
+  own = own.replace(/\s+/g, '').trim()
+  if (own) return own
+  if (el.children.length === 0) return (el.textContent || '').replace(/\s+/g, '').trim()
+  return ''
+}
+
 /**
- * Final hard pass: short labels whose backdrop is dark (solid / url / img / svg)
- * must be pure white. Does not rely on titleLike / class heuristics.
+ * Single source of truth: is this short label sitting on a dark capsule?
+ * Own solid / full-bleed url / sibling overlap / glyph-center probe (SVG/img/HTML).
+ * Never treats html/body, thin rules, or ◆ ::before bullets as dark capsules.
+ *
+ * CRITICAL (明朝 p_title): white/cream background-color + url(blob) black capsule.
+ * Hiding the element for elementsFromPoint also hides that url — must detect via
+ * background-image before probing.
  */
-export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): number {
+export function shortLabelBackdropIsDark(
+  doc: Document,
+  win: Window,
+  node: HTMLElement,
+  themeFg: string,
+): boolean {
+  let cs: CSSStyleDeclaration
+  try {
+    cs = win.getComputedStyle(node)
+  } catch {
+    return false
+  }
+  const rect = node.getBoundingClientRect()
+  if (rect.width < 1 || rect.height < 1) return false
+
+  // url(...) title bars first — own solid is often light (white plate under capsule art).
+  if (urlBackgroundLikelyTitleBar(cs, rect)) return true
+
+  const solid = resolveSurfaceBackgroundCss(node, cs, win, { ignorePseudos: true })
+  if (isDarkSurfaceCss(solid)) return true
+  if (elementOverlapsDarkBackdrop(node, win)) return true
+
+  const cx = rect.left + rect.width / 2
+  const cy = rect.top + rect.height / 2
+  const prev = node.style.getPropertyValue('visibility')
+  const prevPri = node.style.getPropertyPriority('visibility')
+  node.style.setProperty('visibility', 'hidden', 'important')
+  let dark = false
+  try {
+    dark = pointHasDarkBackdrop(doc, win, node, cx, cy, rect.height, themeFg)
+  } catch {
+    dark = false
+  }
+  if (prev) node.style.setProperty('visibility', prev, prevPri || undefined)
+  else node.style.removeProperty('visibility')
+  return dark
+}
+
+/**
+ * ONE definitive pass for short HTML labels:
+ * dark backdrop → pure white + qyOnDark; else → themeFg and clear qyOnDark.
+ * Replaces the old forceShortLabels ↔ reconcile fight.
+ */
+export function applyShortLabelContrast(
+  doc: Document,
+  themeFg: string,
+): { whitened: number; restored: number } {
   const win = doc.defaultView
   const body = doc.body
-  if (!win || !body) return 0
+  if (!win || !body) return { whitened: 0, restored: 0 }
 
   const WHITE = LIGHT_ON_DARK_FG
-  let fixed = 0
+  let whitened = 0
+  let restored = 0
 
-  const force = (el: HTMLElement) => {
-    el.style.setProperty('color', WHITE, 'important')
-    el.style.setProperty('-webkit-text-fill-color', WHITE, 'important')
+  const paint = (el: HTMLElement, onDark: boolean) => {
+    const color = onDark ? WHITE : themeFg
+    el.style.setProperty('color', color, 'important')
+    el.style.setProperty('-webkit-text-fill-color', color, 'important')
     el.style.setProperty('opacity', '1', 'important')
-    el.dataset.qyOnDark = '1'
-    // Overlay on dark sibling/img: shrink bleed. Never strip url()/dark fills.
-    try {
-      const cs = win!.getComputedStyle(el)
-      const bi = cs.backgroundImage || ''
-      if (bi && bi !== 'none' && /url\(/i.test(bi) && !/gradient\(/i.test(bi)) {
-        el.style.setProperty('width', 'auto', 'important')
-        el.style.setProperty('max-width', '100%', 'important')
-        fixed++
-        return
-      }
-      const surface = resolveSurfaceBackgroundCss(el, cs, win)
-      if (isDarkSurfaceCss(surface)) {
-        fixed++
-        return
-      }
-      if (surface && !isTransparentCssColor(surface)) {
-        const rgb = parseCssColor(surface)
-        const L = rgb ? relativeLuminance(rgb.r, rgb.g, rgb.b) : 0
-        if (L > 0.55) {
-          el.style.setProperty('background-color', 'transparent', 'important')
-          el.dataset.qyClearPlate = '1'
-        }
-      }
-      el.style.setProperty('width', 'auto', 'important')
-      el.style.setProperty('max-width', '100%', 'important')
-    } catch {
-      /* */
+    if (onDark) {
+      el.dataset.qyOnDark = '1'
+      whitened++
+    } else {
+      delete el.dataset.qyOnDark
+      restored++
     }
-    fixed++
-  }
-
-  const ownShortText = (el: HTMLElement): string => {
-    let own = ''
-    for (const n of Array.from(el.childNodes)) {
-      if (n.nodeType === 3) own += n.textContent || ''
-    }
-    own = own.replace(/\s+/g, '').trim()
-    if (own) return own
-    if (el.children.length === 0) return (el.textContent || '').replace(/\s+/g, '').trim()
-    return ''
   }
 
   const candidates = body.querySelectorAll(
@@ -643,87 +765,91 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
   candidates.forEach((node) => {
     if (!isHtmlElement(node)) return
     if (node.closest('svg')) return
-    const text = ownShortText(node)
+    const text = ownShortLabelText(node)
     if (!text || text.length > 24) return
 
-    let cs: CSSStyleDeclaration
-    try {
-      cs = win.getComputedStyle(node)
-    } catch {
-      return
-    }
+    const onDark = shortLabelBackdropIsDark(doc, win, node, themeFg)
+    paint(node, onDark)
+  })
 
-    const surface = resolveSurfaceBackgroundCss(node, cs, win)
-    if (isDarkSurfaceCss(surface)) {
-      force(node)
-      return
-    }
+  return { whitened, restored }
+}
 
-    const bi = cs.backgroundImage
-    if (bi && bi !== 'none' && /url\(/i.test(bi) && !/gradient\(/i.test(bi)) {
-      force(node)
-      return
-    }
+/**
+ * @deprecated Use applyShortLabelContrast. Kept as thin wrapper for SVG retry timers.
+ */
+export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): number {
+  return applyShortLabelContrast(doc, themeFg).whitened
+}
 
-    if (elementOverlapsDarkBackdrop(node, win)) {
-      force(node)
-      return
-    }
+/**
+ * @deprecated Use applyShortLabelContrast. Kept for older selftests.
+ */
+export function reconcileOnDarkLabels(doc: Document, themeFg: string): number {
+  return applyShortLabelContrast(doc, themeFg).restored
+}
 
-    // Probe pixels behind the glyphs (catches absolute stacks / z-index overlays).
-    const rect = node.getBoundingClientRect()
-    if (rect.width < 1 || rect.height < 1) return
-    const cx = rect.left + rect.width / 2
-    const cy = rect.top + rect.height / 2
-    const prev = node.style.getPropertyValue('visibility')
-    const prevPri = node.style.getPropertyPriority('visibility')
-    node.style.setProperty('visibility', 'hidden', 'important')
-    let behind: Element | null = null
-    try {
-      behind = doc.elementFromPoint(cx, cy)
-    } catch {
-      behind = null
+/**
+ * True when the glyph center sits on a dark layer (HTML pill / img / SVG capsule).
+ * Uses elementsFromPoint so cream plates above/under the black bar do not hide it.
+ */
+export function pointHasDarkBackdrop(
+  doc: Document,
+  win: Window,
+  node: HTMLElement,
+  cx: number,
+  cy: number,
+  textH: number,
+  themeFg: string,
+): boolean {
+  let stack: Element[] = []
+  try {
+    if (typeof doc.elementsFromPoint === 'function') {
+      stack = doc.elementsFromPoint(cx, cy)
+    } else {
+      const one = doc.elementFromPoint(cx, cy)
+      if (one) stack = [one]
     }
-    if (prev) node.style.setProperty('visibility', prev, prevPri || undefined)
-    else node.style.removeProperty('visibility')
+  } catch {
+    stack = []
+  }
 
-    let el: Element | null = behind
-    for (let i = 0; i < 6 && el; i++) {
-      if (el === node) {
-        el = el.parentElement
-        continue
+  const consider = (el: Element | null): boolean => {
+    if (!el || el === node) return false
+    const tag = el.tagName.toLowerCase()
+    // Page canvas is never a "title capsule" — treating html/body as dark
+    // kept ◆ cream heads white whenever the shell theme painted html dark.
+    if (tag === 'html' || tag === 'body') return false
+    if (tag === 'hr' || tag === 'br' || tag === 'script' || tag === 'style') return false
+
+    if (tag === 'img') {
+      try {
+        const img = el as HTMLImageElement
+        const r = img.getBoundingClientRect()
+        if (isThinDecorativeRule(r, textH)) return false
+        if (r.height < Math.max(16, textH * 0.5)) return false
+        if (!img.naturalWidth) return true
+        const canvas = doc.createElement('canvas')
+        canvas.width = 1
+        canvas.height = 1
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return true
+        const nx = ((cx - r.left) / r.width) * img.naturalWidth
+        const ny = ((cy - r.top) / r.height) * img.naturalHeight
+        ctx.drawImage(img, nx, ny, 1, 1, 0, 0, 1, 1)
+        const d = ctx.getImageData(0, 0, 1, 1).data
+        return relativeLuminance(d[0], d[1], d[2]) < 0.42
+      } catch {
+        return true
       }
-      if (el.tagName.toLowerCase() === 'img') {
-        try {
-          const img = el as HTMLImageElement
-          const r = img.getBoundingClientRect()
-          if (r.width >= 1 && img.naturalWidth) {
-            const canvas = doc.createElement('canvas')
-            canvas.width = 1
-            canvas.height = 1
-            const ctx = canvas.getContext('2d')
-            if (ctx) {
-              const nx = ((cx - r.left) / r.width) * img.naturalWidth
-              const ny = ((cy - r.top) / r.height) * img.naturalHeight
-              ctx.drawImage(img, nx, ny, 1, 1, 0, 0, 1, 1)
-              const d = ctx.getImageData(0, 0, 1, 1).data
-              if (relativeLuminance(d[0], d[1], d[2]) < 0.42) {
-                force(node)
-                return
-              }
-            }
-          } else {
-            force(node)
-            return
-          }
-        } catch {
-          force(node)
-          return
-        }
-      }
-      if (isSvgSvgElement(el) || (el.namespaceURI === 'http://www.w3.org/2000/svg' && (el as SVGElement).ownerSVGElement)) {
-        const svg = isSvgSvgElement(el) ? el : (el as SVGElement).ownerSVGElement!
+    }
+
+    if (isSvgSvgElement(el) || (el.namespaceURI === 'http://www.w3.org/2000/svg' && (el as SVGElement).ownerSVGElement)) {
+      const svg = isSvgSvgElement(el) ? el : (el as SVGElement).ownerSVGElement!
+      if (!svg) return false
+      try {
         const sr = svg.getBoundingClientRect()
+        if (isThinDecorativeRule(sr, textH)) return false
         const vb = svg.viewBox?.baseVal
         let ux = cx - sr.left
         let uy = cy - sr.top
@@ -732,31 +858,37 @@ export function forceShortLabelsOnDarkBackdrop(doc: Document, themeFg: string): 
           uy = vb.y + ((cy - sr.top) / sr.height) * vb.height
         }
         const bands = collectSvgTitleBands(svg, themeFg)
-        if (pointInSvgBands(ux, uy, bands) || svgPointOnDarkShape(svg, ux, uy, themeFg)) {
-          force(node)
-          return
-        }
+        if (pointInSvgBands(ux, uy, bands) || svgPointOnDarkShape(svg, ux, uy, themeFg)) return true
+      } catch {
+        return false
       }
-      if (isHtmlElement(el)) {
-        try {
-          const s = resolveSurfaceBackgroundCss(el, win.getComputedStyle(el), win)
-          if (isDarkSurfaceCss(s)) {
-            force(node)
-            return
-          }
-          const ebi = win.getComputedStyle(el).backgroundImage
-          if (ebi && ebi !== 'none' && /url\(/i.test(ebi)) {
-            force(node)
-            return
-          }
-        } catch {
-          /* */
-        }
-      }
-      el = el.parentElement
+      return false
     }
-  })
 
-  return fixed
+    if (isHtmlElement(el)) {
+      try {
+        const br = el.getBoundingClientRect()
+        if (isThinDecorativeRule(br, textH)) return false
+        const ecs = win.getComputedStyle(el)
+        const s = resolveSurfaceBackgroundCss(el, ecs, win, { ignorePseudos: true })
+        if (isDarkSurfaceCss(s) && br.height >= Math.max(16, textH * 0.5)) return true
+        if (urlBackgroundLikelyTitleBar(ecs, br)) return true
+      } catch {
+        /* */
+      }
+    }
+    return false
+  }
+
+  for (const el of stack) {
+    if (el === node) continue
+    // Walk a short ancestor chain from each hit (cream wrapper may be topmost).
+    let cur: Element | null = el
+    for (let i = 0; i < 5 && cur; i++) {
+      if (consider(cur)) return true
+      cur = cur.parentElement
+    }
+  }
+  return false
 }
 
