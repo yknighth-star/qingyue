@@ -1,7 +1,8 @@
 /**
  * Book-level reading profile for EPUB.
- * Large CN web-novel packages (e.g. 诡秘之主) have hundreds/thousands of spine
- * items and almost no images — they need a different cost model than illustrated books.
+ * - 诡秘之主-class: huge spine, almost no images → textNovel
+ * - 明朝那些事儿-class: huge spine + many images → illustratedLarge
+ * Both need cheap turns; illustratedLarge still needs eventual contrast washes.
  */
 
 export interface EpubBookProfile {
@@ -12,6 +13,8 @@ export interface EpubBookProfile {
   largeSpine: boolean
   /** Text-heavy web novel: skip publisher washes / scripts / heavy theme thrash. */
   textNovel: boolean
+  /** Large spine + many images (e.g. 明朝那些事儿图文版). */
+  illustratedLarge: boolean
 }
 
 type ResourcesLike = {
@@ -35,6 +38,7 @@ export function detectEpubBookProfile(
   // Web-novel shaped: long spine, few images, not a gigantic comic archive.
   const textNovel =
     largeSpine && imageAssetCount <= 48 && (fileBytes <= 0 || fileBytes < 120 * 1024 * 1024)
+  const illustratedLarge = largeSpine && !textNovel
 
   return {
     spineLength,
@@ -42,5 +46,6 @@ export function detectEpubBookProfile(
     fileBytes,
     largeSpine,
     textNovel,
+    illustratedLarge,
   }
 }

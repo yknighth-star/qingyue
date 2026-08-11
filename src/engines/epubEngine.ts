@@ -109,6 +109,9 @@ export class EpubEngine implements ReaderEngine {
   private turnSettleUntil = 0
   /** Chapter-hop hold plate is up — defer late theme/media until dispose. */
   private chapterHolding = false
+  /** Docs that need idle wash/media after illustrated chapter hold ends. */
+  private postHoldDocs = new Set<Document>()
+  private postHoldFlushTimer: number | null = null
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -221,7 +224,10 @@ export class EpubEngine implements ReaderEngine {
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
       // Theme lives in bindContentEvents (new iframe) + settings apply — not every column hop.
-      if (!this.bookProfile?.textNovel) this.schedulePostRelocateWork()
+      // Illustrated large-spine (明朝): media refit after every relocate is the second flash.
+      if (!this.bookProfile?.textNovel && !this.bookProfile?.illustratedLarge) {
+        this.schedulePostRelocateWork()
+      }
     })
 
     this.scheduleLocationsGenerate()
@@ -613,24 +619,29 @@ export class EpubEngine implements ReaderEngine {
     injectCaretSuppression(doc)
 
     const textNovel = Boolean(this.bookProfile?.textNovel)
+    const illustratedLarge = Boolean(this.bookProfile?.illustratedLarge)
+    // Under hold / text-novel: no wash storm on first paint.
+    // Illustrated-large (明朝): also skip sync washes — idle polish after reveal.
+    const skipWashesNow = textNovel || illustratedLarge || this.chapterHolding
     if (this.settings) {
-      // Defer contrast wash so first paint / first turn stay responsive on PC.
-      // Text novels: stylesheet + html/body only — no publisher wash walks / repaint storms.
       this.applyThemeColorsToDocument(doc, this.settings, true, {
         deferWashes: true,
-        skipWashes: textNovel,
+        skipWashes: skipWashesNow,
       })
       this.applyTypographyToDocument(doc, this.settings)
-      if (!textNovel) this.scheduleThemeRepaint(doc)
+      if (!textNovel && !illustratedLarge && !this.chapterHolding) {
+        this.scheduleThemeRepaint(doc)
+      }
     }
     // After theme so title centering does not flash unthemed publisher layout first.
     this.normalizeChapterTitles(doc)
-    if (!textNovel) {
-      // After theme paint so inline media caps win; re-fit when late images decode.
+    if (illustratedLarge) {
+      this.postHoldDocs.add(doc)
+      if (!this.chapterHolding) this.armPostHoldFlush()
+    } else if (!textNovel) {
       this.containOverflowMedia(doc)
       const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
       this.mediaRefitDisposers.push(disposeRefit)
-      // Publisher @font-face relative urls resolve to about:srcdoc and Chrome blocks them.
       void this.rewriteDocFonts(doc)
     }
     this.syncDocTouchAction(doc)
@@ -910,6 +921,11 @@ export class EpubEngine implements ReaderEngine {
     this.turning = false
     this.turnSettleUntil = 0
     this.chapterHolding = false
+    this.postHoldDocs.clear()
+    if (this.postHoldFlushTimer != null) {
+      window.clearTimeout(this.postHoldFlushTimer)
+      this.postHoldFlushTimer = null
+    }
     this.layoutLocked = false
     this.locationsReady = false
     this.locationsGen += 1
@@ -1135,6 +1151,7 @@ export class EpubEngine implements ReaderEngine {
       prev: () => Promise<unknown>
     }
     const textNovel = Boolean(this.bookProfile?.textNovel)
+    const illustratedLarge = Boolean(this.bookProfile?.illustratedLarge)
     const crossSpine = this.willCrossSpine(dir)
     // Within-chapter: short relocate wait. Chapter hop: wait for RENDERED (after theme hook).
     const settleCapMs = crossSpine ? (textNovel ? 1800 : 2500) : textNovel ? 160 : 280
@@ -1161,10 +1178,12 @@ export class EpubEngine implements ReaderEngine {
       else await rendition.prev()
       await settled
 
-      // One paint settle + one silent snap — never theme/lock again here.
-      await new Promise<void>((r) => requestAnimationFrame(() => r()))
+      // Two frames after RENDERED so new iframe theme shell can composite under the hold.
+      await new Promise<void>((r) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => r())),
+      )
       this.snapPaginatedScroll()
-      if (!textNovel) this.clearTurnArtifacts()
+      if (!textNovel && !illustratedLarge) this.clearTurnArtifacts()
     } catch {
       /* at bound / destroyed */
     } finally {
@@ -1172,8 +1191,57 @@ export class EpubEngine implements ReaderEngine {
       this.chapterHolding = false
       this.turning = false
       this.layoutLocked = false
-      // Cover SCROLLED(20ms) + queued reportLocation rAF if anything still echoed.
-      this.turnSettleUntil = performance.now() + (crossSpine ? 160 : 100)
+      // Illustrated large-spine: long settle so post-hold wash/media do not stack on reveal.
+      this.turnSettleUntil =
+        performance.now() + (crossSpine ? (illustratedLarge ? 420 : 160) : 100)
+      if (illustratedLarge && crossSpine) this.flushPostHoldWork()
+    }
+  }
+
+  private armPostHoldFlush() {
+    if (this.postHoldFlushTimer != null) return
+    this.postHoldFlushTimer = window.setTimeout(() => {
+      this.postHoldFlushTimer = null
+      if (this.chapterHolding || this.turning) {
+        this.armPostHoldFlush()
+        return
+      }
+      this.flushPostHoldWork()
+    }, 360)
+  }
+
+  /**
+   * After chapter hold reveal: one quiet idle pass for washes/media/fonts.
+   * Must not run while the hold plate is up or on the same frame as dispose.
+   */
+  private flushPostHoldWork() {
+    if (this.postHoldFlushTimer != null) {
+      window.clearTimeout(this.postHoldFlushTimer)
+      this.postHoldFlushTimer = null
+    }
+    const docs = [...this.postHoldDocs]
+    this.postHoldDocs.clear()
+    if (!docs.length || !this.settings) return
+    const settings = this.settings
+    const run = () => {
+      if (!this.settings || this.settings !== settings) return
+      if (this.chapterHolding || this.turning) return
+      for (const doc of docs) {
+        if (!doc.defaultView || doc.defaultView.closed) continue
+        this.applyThemeColorsToDocument(doc, settings, false, {
+          deferWashes: false,
+          skipWashes: false,
+        })
+        this.containOverflowMedia(doc)
+        const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
+        this.mediaRefitDisposers.push(disposeRefit)
+        void this.rewriteDocFonts(doc)
+      }
+    }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => run(), { timeout: 800 })
+    } else {
+      window.setTimeout(run, 320)
     }
   }
 

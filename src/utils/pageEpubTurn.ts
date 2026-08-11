@@ -338,8 +338,8 @@ export async function mountEpubChapterHold(
     overflow: 'hidden',
     pointerEvents: 'none',
     background: bg,
-    // Visible immediately with bg; srcdoc paints over when ready.
-    visibility: 'visible',
+    // Stay hidden until srcdoc paints — visible solid bg over illustrated pages = flash #1.
+    visibility: 'hidden',
   })
 
   const plate = document.createElement('div')
@@ -375,8 +375,12 @@ export async function mountEpubChapterHold(
   try {
     await waitFrameSrcdoc(frame, srcdoc, 1200)
     await frames(1)
+    wrap.style.visibility = 'visible'
+    // One more frame so the plate is composited before epub.js clear() runs underneath.
+    await frames(1)
   } catch {
-    // Keep solid bg wrap — still covers clear() blank.
+    // Fallback solid cover — still better than empty blink on clear().
+    wrap.style.visibility = 'visible'
   }
 
   return () => {
