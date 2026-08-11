@@ -102,6 +102,8 @@ export class EpubEngine implements ReaderEngine {
   /** Coalesced EPUB turns: +next / -prev. Rapid PC wheel must not drop. */
   private turnPending = 0
   private turnPump: Promise<void> | null = null
+  /** True while next/prev is in flight — relocate must not re-theme / re-snap (double flash). */
+  private turning = false
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -208,16 +210,13 @@ export class EpubEngine implements ReaderEngine {
       const loc = args[0] as EpubRelocatedLoc
       this.spineIndex = loc.start?.index ?? 0
       this.progressCb?.(this.getProgressFromLoc(loc))
+      // During next/prev: only report progress. Theme/snap/lock here + again in turnPage
+      // caused the visible double flash / bounce on every turn (esp. text novels).
+      if (this.turning) return
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
-      // Soft theme only — full wash/media fit are deferred (PC illustrated books thrash otherwise).
-      // Text novels: skip wash/media entirely on relocate — spine hops must stay cheap.
-      if (this.bookProfile?.textNovel) {
-        if (this.settings) this.reassertThemeColors(this.settings, { light: true, skipWashes: true })
-        return
-      }
-      if (this.settings) this.reassertThemeColors(this.settings, { light: true })
-      this.schedulePostRelocateWork()
+      // Theme lives in bindContentEvents (new iframe) + settings apply — not every column hop.
+      if (!this.bookProfile?.textNovel) this.schedulePostRelocateWork()
     })
 
     this.scheduleLocationsGenerate()
@@ -412,19 +411,19 @@ export class EpubEngine implements ReaderEngine {
     const max = Math.max(0, scroller.scrollWidth - pageW)
     const raw = scroller.scrollLeft
     const snapped = Math.min(max, Math.max(0, Math.round(raw / pageW) * pageW))
-    if (Math.abs(raw - snapped) >= 0.5) {
+    // Ignore sub-pixel drift — snapping 0.5px fights epub.js and reads as bounce.
+    if (Math.abs(raw - snapped) >= 2) {
       scroller.scrollLeft = snapped
     }
-    // Ensure the stage clips any residual column paint outside the page box.
-    root.style.setProperty('overflow', 'hidden', 'important')
-    scroller.style.setProperty('overflow-x', 'hidden', 'important')
-    scroller.style.setProperty('overflow-y', 'hidden', 'important')
   }
 
   /** Kill horizontal scrollbars that epub.js "overflow: auto" otherwise enables. */
   private lockEpubHorizontalOverflow() {
     const root = this.container
     if (!root) return
+    // Paginated: mutate once. Re-applying overflow/maxWidth every relocate causes jitter.
+    if (this.pageTurn !== 'scroll' && this.overflowLocked) return
+
     const container = root.querySelector('.epub-container') as HTMLElement | null
     if (container) {
       container.style.setProperty('overflow-x', 'hidden', 'important')
@@ -436,9 +435,7 @@ export class EpubEngine implements ReaderEngine {
       container.style.maxWidth = '100%'
       container.style.boxSizing = 'border-box'
     }
-    // Paginated: after first successful view lock, skip re-mutating every relocated (reduces jitter).
-    // Overflow clip above still runs every call.
-    if (this.pageTurn !== 'scroll' && this.overflowLocked) return
+    root.style.setProperty('overflow', 'hidden', 'important')
 
     // Only clamp view/iframe width in continuous scroll mode.
     // Paginated: epub.js expand() needs views wider than the viewport.
@@ -810,6 +807,8 @@ export class EpubEngine implements ReaderEngine {
     this.bookProfile = null
     this.turnPending = 0
     this.turnPump = null
+    this.turning = false
+    this.layoutLocked = false
     this.locationsReady = false
     this.locationsGen += 1
     if (this.locationsTimer) {
@@ -1037,7 +1036,9 @@ export class EpubEngine implements ReaderEngine {
     }
     const textNovel = Boolean(this.bookProfile?.textNovel)
     // Text novels: shorter relocate wait — chapter hops are frequent; do not pad 400ms+.
-    const relocateCapMs = textNovel ? 180 : 320
+    const relocateCapMs = textNovel ? 160 : 280
+    this.turning = true
+    this.layoutLocked = true
     const relocated = new Promise<void>((resolve) => {
       const timer = window.setTimeout(() => {
         rendition.off('relocated', onRelocated)
@@ -1053,26 +1054,31 @@ export class EpubEngine implements ReaderEngine {
     try {
       if (dir === 'next') await rendition.next()
       else await rendition.prev()
-    } catch {
-      /* at bound */
-    }
-    await relocated
-    if (textNovel) {
-      // Single rAF is enough; skip second paint wait + artifact scrub when coalescing.
+      await relocated
+      // One paint settle + one snap — never theme/lock again here (that was the double flash).
       await new Promise<void>((r) => requestAnimationFrame(() => r()))
       this.snapPaginatedScroll()
-      return
+      if (!textNovel) this.clearTurnArtifacts()
+    } catch {
+      /* at bound / destroyed */
+    } finally {
+      this.turning = false
+      this.layoutLocked = false
     }
-    // Double-rAF: paint settles, then snap out any mid-column scrollLeft drift.
-    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
-    this.snapPaginatedScroll()
-    this.clearTurnArtifacts()
   }
 
   /** Soft-turn / drag chrome must not leave transform/filter on the live surface. */
   private clearTurnArtifacts() {
     const root = this.container
     if (!root) return
+    const dirty =
+      root.classList.contains('slide-hold') ||
+      root.classList.contains('curl-hold') ||
+      root.style.transform ||
+      root.style.filter ||
+      root.style.opacity ||
+      root.style.visibility
+    if (!dirty) return
     root.style.removeProperty('transform')
     root.style.removeProperty('filter')
     root.style.removeProperty('box-shadow')
@@ -2133,7 +2139,12 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         const doc = c.document
         if (!doc) return
         const styleEl = doc.getElementById('qingyue-theme') as HTMLStyleElement | null
-        if (!styleEl || doc.documentElement.dataset.qyTheme !== fp) {
+        const root = doc.documentElement
+        // Already themed and sheet is last — do not pin/move nodes (FOUC / flash).
+        if (styleEl && root.dataset.qyTheme === fp && root.lastElementChild === styleEl) {
+          return
+        }
+        if (!styleEl || root.dataset.qyTheme !== fp) {
           this.applyThemeColorsToDocument(doc, settings, true, {
             deferWashes: Boolean(opts?.light),
             skipWashes,
@@ -2142,8 +2153,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         }
         this.themeApplyDepth += 1
         try {
-          this.pinThemeStyleLast(doc, styleEl)
-          const root = doc.documentElement
+          if (root.lastElementChild !== styleEl) this.pinThemeStyleLast(doc, styleEl)
           root.style.setProperty('background-color', bg, 'important')
           root.style.setProperty('background-image', 'none', 'important')
           root.style.setProperty('color', fg, 'important')

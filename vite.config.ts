@@ -160,7 +160,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        cacheId: 'qingyue-v30',
+        cacheId: 'qingyue-v31',
         cleanupOutdatedCaches: true,
         globPatterns: [
           '**/*.{js,mjs,css,html,ico,png,svg,woff2,wasm,traineddata}',
