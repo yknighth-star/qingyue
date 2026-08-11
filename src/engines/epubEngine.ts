@@ -55,6 +55,21 @@ type EpubViewLike = {
   iframe?: HTMLIFrameElement
   show?: () => void
   emit?: (event: string, view: EpubViewLike) => void
+  section?: { index?: number; next?: () => { index: number } | undefined; prev?: () => { index: number } | undefined }
+}
+
+type EpubSpineManager = {
+  container?: HTMLElement
+  layout?: { delta: number }
+  append?: (section: unknown) => Promise<unknown>
+  views: {
+    length: number
+    all?: () => EpubViewLike[]
+    last?: () => EpubViewLike | undefined
+    first?: () => EpubViewLike | undefined
+    show?: () => void
+    remove?: (view: EpubViewLike) => void
+  }
 }
 
 export class EpubEngine implements ReaderEngine {
@@ -113,9 +128,9 @@ export class EpubEngine implements ReaderEngine {
   private turning = false
   /** After turn settle: ignore snap/lock on echo relocates (SCROLLED → reportLocation). */
   private turnSettleUntil = 0
-  /** epub.js clear() ran during this turn — stage is hidden until RENDERED. */
-  private chapterCleared = false
-  private clearOrig: (() => void) | null = null
+  /** Prefetch next/prev spine so chapter hops are scrollBy (no clear/blank). */
+  private adjacentPrefetchTimer: number | null = null
+  private adjacentPrefetching: Promise<void> | null = null
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -181,7 +196,7 @@ export class EpubEngine implements ReaderEngine {
       hooks: { content: { register: (fn: (contents: ContentsDoc) => void) => void } }
     }
     hooks.hooks.content.register((contents) => this.bindContentEvents(contents))
-    this.installChapterTurnGuard()
+    this.installQuietViewShow()
 
     const initial = opts?.initialLocator
     const displayTarget =
@@ -200,7 +215,8 @@ export class EpubEngine implements ReaderEngine {
       /* */
     }
 
-    // Fonts can wait until after first page is interactive (rewriteDocFonts also runs on mount).
+    // Prefetch neighbor spine so the first chapter-edge turn does not clear().
+    this.scheduleAdjacentPrefetch(0)
     void remapBookCssFonts(this.book, this.fontUrlCache).catch((err) => {
       console.warn('epub css font remap failed', err)
     })
@@ -235,42 +251,36 @@ export class EpubEngine implements ReaderEngine {
       this.progressCb?.(this.getProgressFromLoc(loc))
       // During / just after next/prev: progress only. Echo relocates from snap/SCROLLED
       // used to re-snap and read as a second flash.
-      if (this.turning || performance.now() < this.turnSettleUntil) return
+      if (this.turning || performance.now() < this.turnSettleUntil) {
+        if (!this.turning) this.scheduleAdjacentPrefetch(80)
+        return
+      }
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
       // Theme lives in bindContentEvents (new iframe) + settings apply — not every column hop.
       // Large-spine books (诡秘 / 明朝): media refit after relocate is a second flash.
       if (!this.bookProfile?.largeSpine) this.schedulePostRelocateWork()
+      this.scheduleAdjacentPrefetch(120)
     })
 
     this.scheduleLocationsGenerate()
   }
 
   /**
-   * Chapter hops: hide the stage before epub.js clear() blanks it, reveal once after
-   * RENDERED. Also strip iframe translateZ forced-reflow (extra flash on show).
+   * epub.js iframe.show() does translateZ+offsetWidth forced reflow (visible flash).
+   * Strip that; keep a normal visibility show.
    */
-  private installChapterTurnGuard() {
+  private installQuietViewShow() {
     const mgr = (
       this.rendition as unknown as {
         manager?: {
-          clear?: () => void
           on?: (event: string, fn: (view: EpubViewLike) => void) => void
-          __qyTurnGuard?: boolean
+          __qyQuietShow?: boolean
         }
       }
     )?.manager
-    if (!mgr?.clear || mgr.__qyTurnGuard) return
-    mgr.__qyTurnGuard = true
-    this.clearOrig = mgr.clear.bind(mgr)
-    mgr.clear = () => {
-      if (this.turning && this.container) {
-        // Hide before blank paint — parent stage keeps --reader-bg.
-        this.container.style.visibility = 'hidden'
-        this.chapterCleared = true
-      }
-      this.clearOrig?.()
-    }
+    if (!mgr || mgr.__qyQuietShow) return
+    mgr.__qyQuietShow = true
     mgr.on?.('added', (view) => this.quietViewShow(view))
   }
 
@@ -282,7 +292,6 @@ export class EpubEngine implements ReaderEngine {
       try {
         if (view.element) view.element.style.visibility = 'visible'
         if (view.iframe) view.iframe.style.visibility = 'visible'
-        // Skip translateZ(0)+offsetWidth forced reflow — that flash stacked on chapter hops.
       } catch {
         /* */
       }
@@ -294,9 +303,100 @@ export class EpubEngine implements ReaderEngine {
     }
   }
 
-  private revealReaderStage() {
-    if (!this.container) return
-    this.container.style.removeProperty('visibility')
+  /**
+   * Root fix for chapter-edge flash: keep next (and optionally prev) spine views
+   * mounted so epub.js next()/prev() only scrollBy — never clear()+new iframe.
+   */
+  private scheduleAdjacentPrefetch(delayMs = 160) {
+    if (this.pageTurn === 'scroll') return
+    if (this.adjacentPrefetchTimer != null) window.clearTimeout(this.adjacentPrefetchTimer)
+    this.adjacentPrefetchTimer = window.setTimeout(() => {
+      this.adjacentPrefetchTimer = null
+      void this.prefetchAdjacentSections()
+    }, delayMs)
+  }
+
+  private spineViewManager(): EpubSpineManager | null {
+    return (
+      this.rendition as unknown as { manager?: EpubSpineManager } | null
+    )?.manager ?? null
+  }
+
+  private async prefetchAdjacentSections() {
+    if (!this.rendition || this.turning || this.pageTurn === 'scroll') return
+    if (this.adjacentPrefetching) return this.adjacentPrefetching
+    const mgr = this.spineViewManager()
+    if (!mgr?.views?.length || !mgr.append) return
+
+    this.adjacentPrefetching = (async () => {
+      const append = mgr.append
+      if (!append) return
+      try {
+        const last = mgr.views.last?.()
+        const nextSec = last?.section?.next?.()
+        const nextIdx = nextSec?.index
+        if (nextSec && typeof nextIdx === 'number' && !this.managerHasSection(mgr, nextIdx)) {
+          await append(nextSec)
+          try {
+            mgr.views.show?.()
+          } catch {
+            /* */
+          }
+        }
+        this.trimDistantSpineViews(mgr)
+      } catch (err) {
+        console.warn('epub adjacent prefetch failed', err)
+      } finally {
+        this.adjacentPrefetching = null
+      }
+    })()
+    return this.adjacentPrefetching
+  }
+
+  private managerHasSection(mgr: EpubSpineManager, index: number) {
+    try {
+      return Boolean(mgr.views.all?.().some((v) => v.section?.index === index))
+    } catch {
+      return false
+    }
+  }
+
+  /** Keep at most two spine views (current + next) to bound memory. */
+  private trimDistantSpineViews(mgr: EpubSpineManager) {
+    try {
+      let views = mgr.views.all?.() || []
+      while (views.length > 2) {
+        const drop = views[0]
+        const last = mgr.views.last?.()
+        if (!drop || drop === last) break
+        try {
+          mgr.views.remove?.(drop)
+        } catch {
+          break
+        }
+        views = mgr.views.all?.() || []
+      }
+    } catch {
+      /* */
+    }
+  }
+
+  /** True when next turn would otherwise clear() — next spine not yet mounted. */
+  private chapterEdgeNeedsPrefetch(dir: 'next' | 'prev'): boolean {
+    const mgr = this.spineViewManager()
+    if (!mgr?.container || !mgr.layout || !mgr.views?.length) return false
+    if (this.pageTurn === 'scroll') return false
+    const c = mgr.container
+    const delta = mgr.layout.delta || c.offsetWidth
+    if (dir === 'next') {
+      const left = c.scrollLeft + c.offsetWidth + delta
+      if (left <= c.scrollWidth) return false
+      const nextSec = mgr.views.last?.()?.section?.next?.()
+      return Boolean(nextSec && !this.managerHasSection(mgr, nextSec.index))
+    }
+    if (c.scrollLeft > 0) return false
+    const prevSec = mgr.views.first?.()?.section?.prev?.()
+    return Boolean(prevSec && !this.managerHasSection(mgr, prevSec.index))
   }
 
   /**
@@ -647,7 +747,7 @@ export class EpubEngine implements ReaderEngine {
       const settings = this.settings
       const run = () => {
         if (!this.settings || this.settings !== settings) return
-        if (this.turning || this.chapterCleared) return
+        if (this.turning) return
         if (!doc.defaultView || doc.defaultView.closed) return
         this.containOverflowMedia(doc)
         const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
@@ -941,8 +1041,11 @@ export class EpubEngine implements ReaderEngine {
     this.turnPump = null
     this.turning = false
     this.turnSettleUntil = 0
-    this.chapterCleared = false
-    this.clearOrig = null
+    if (this.adjacentPrefetchTimer != null) {
+      window.clearTimeout(this.adjacentPrefetchTimer)
+      this.adjacentPrefetchTimer = null
+    }
+    this.adjacentPrefetching = null
     this.layoutLocked = false
     this.locationsReady = false
     this.locationsGen += 1
@@ -1172,36 +1275,30 @@ export class EpubEngine implements ReaderEngine {
 
     this.turning = true
     this.layoutLocked = true
-    this.chapterCleared = false
-
-    const relocatedP = this.waitRenditionEvent('relocated', textNovel || illustratedLarge ? 200 : 320)
-    const renderedP = this.waitRenditionEvent('rendered', illustratedLarge || textNovel ? 2000 : 2500)
 
     try {
+      // Ensure next spine is already mounted → next() becomes scrollBy (no clear/blank).
+      if (this.chapterEdgeNeedsPrefetch(dir)) {
+        await this.prefetchAdjacentSections()
+      }
+
+      const relocated = this.waitRenditionEvent(
+        'relocated',
+        textNovel || illustratedLarge ? 200 : 320,
+      )
       if (dir === 'next') await rendition.next()
       else await rendition.prev()
-
-      if (this.chapterCleared) {
-        // Stage is visibility:hidden since clear(). Wait theme+show, then reveal once.
-        await renderedP
-        await new Promise<void>((r) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => r())),
-        )
-        this.revealReaderStage()
-      } else {
-        await relocatedP
-        await new Promise<void>((r) => requestAnimationFrame(() => r()))
-        this.snapPaginatedScroll()
-      }
+      await relocated
+      await new Promise<void>((r) => requestAnimationFrame(() => r()))
+      this.snapPaginatedScroll()
       if (!textNovel && !illustratedLarge) this.clearTurnArtifacts()
     } catch {
       /* at bound / destroyed */
     } finally {
-      this.revealReaderStage()
-      this.chapterCleared = false
       this.turning = false
       this.layoutLocked = false
-      this.turnSettleUntil = performance.now() + 120
+      this.turnSettleUntil = performance.now() + 100
+      this.scheduleAdjacentPrefetch(60)
     }
   }
 
@@ -2281,7 +2378,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       const timer = window.setTimeout(() => {
         this.themeRepaintTimers = this.themeRepaintTimers.filter((t) => t !== timer)
         if (!this.settings || this.settings !== settings) return
-        if (this.turning || this.chapterCleared) return
+        if (this.turning) return
         if (!doc.defaultView || doc.defaultView.closed) return
         this.applyThemeColorsToDocument(doc, settings, i === 0, {
           deferWashes: i > 0 || w >= 1100,
