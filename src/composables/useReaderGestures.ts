@@ -67,7 +67,11 @@ export function useReaderGestures(opts: {
   }
 
   function turnByDelta(deltaY: number) {
-    if (!opts.engine.value || opts.panel.value !== 'none') return
+    if (!opts.engine.value) return
+    if (opts.panel.value !== 'none') {
+      opts.closePanel()
+      return
+    }
     if (opts.shouldBlockTapActions() || inMarkMode()) return
     if (isScrollMode()) return
     const now = Date.now()
@@ -91,6 +95,10 @@ export function useReaderGestures(opts: {
   }
 
   function onEdgeTurn(dir: 'prev' | 'next') {
+    if (opts.panel.value !== 'none') {
+      opts.closePanel()
+      return
+    }
     if (opts.shouldBlockTapActions() || inMarkMode()) return
     if (isScrollMode()) return
     if (dir === 'prev') void opts.engine.value?.prev()
@@ -121,7 +129,10 @@ export function useReaderGestures(opts: {
   }
 
   function onStageClick(e: MouseEvent) {
-    if (opts.panel.value !== 'none') return
+    if (opts.panel.value !== 'none') {
+      opts.closePanel()
+      return
+    }
     if (Date.now() < opts.getIgnoreTapUntil() || Date.now() < ignoreClickUntil) return
     if (dismissMarkOrChrome()) return
     if (opts.hasTextSelection()) return

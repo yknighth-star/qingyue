@@ -41,7 +41,12 @@ export class TxtEngine implements ReaderEngine {
     getRoot: () => this.contentEl,
   })
 
-  async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
+  async open(
+    blob: Blob,
+    settings: ReaderSettings,
+    container: HTMLElement,
+    opts?: import('./types').OpenBookOptions,
+  ) {
     this.destroy()
     this.container = container
     this.settings = settings
@@ -56,7 +61,15 @@ export class TxtEngine implements ReaderEngine {
     }
     this.text = text
     this.chapters = splitTxtChapters(text)
-    this.chapterId = 0
+    const initial = opts?.initialLocator
+    if (initial && initial.type === 'txt' && typeof initial.chapterId === 'number') {
+      this.chapterId = Math.min(
+        this.chapters.length - 1,
+        Math.max(0, initial.chapterId),
+      )
+    } else {
+      this.chapterId = 0
+    }
 
     container.innerHTML = ''
     container.className = 'txt-reader'
@@ -66,6 +79,18 @@ export class TxtEngine implements ReaderEngine {
     this.contentEl = content
     this.applySettings(settings)
     this.renderChapter()
+    if (initial && initial.type === 'txt' && initial.charOffset != null && this.contentEl) {
+      // Approximate scroll within chapter after layout.
+      const ch = this.chapters[this.chapterId]
+      if (ch) {
+        const local = Math.max(0, initial.charOffset - ch.start)
+        const ratio = ch.end > ch.start ? local / (ch.end - ch.start) : 0
+        requestAnimationFrame(() => {
+          if (!this.contentEl) return
+          this.contentEl.scrollTop = this.contentEl.scrollHeight * Math.min(0.98, ratio)
+        })
+      }
+    }
     content.addEventListener('scroll', this.onScroll, { passive: true })
     content.addEventListener('wheel', this.onWheelEvent, { passive: false })
     this.selectionBridge.bind(content)

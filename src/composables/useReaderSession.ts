@@ -58,17 +58,26 @@ export function useReaderSession(opts: {
     opening.value = true
     openHint.value = '正在打开…'
     try {
-      await books.refresh()
-      await settingsStore.load()
-      const b = books.books.find((x) => x.id === opts.bookId) || null
+      // Prefer in-memory shelf; only refresh when the book is missing (avoids IDB list on every open).
+      let b = books.books.find((x) => x.id === opts.bookId) || null
+      if (!b) {
+        await books.refresh()
+        b = books.books.find((x) => x.id === opts.bookId) || null
+      }
       book.value = b
       if (!b) {
         error.value = '未找到文件'
         return
       }
+
       openHint.value = '正在加载文件…'
       await nextTick()
-      const blob = await books.getBlob(b.id)
+
+      const [, blob, saved] = await Promise.all([
+        settingsStore.load(),
+        books.getBlob(b.id),
+        books.getProgress(b.id),
+      ])
       if (!blob) {
         error.value = b.storage === 'fs' ? '无法读取，请重新关联目录' : '书籍缺失'
         return
@@ -78,7 +87,7 @@ export function useReaderSession(opts: {
         b.format === 'pdf'
           ? '正在解析 PDF（优先首页）…'
           : b.format === 'epub'
-            ? '正在解析 EPUB…'
+            ? '正在打开 EPUB（优先当前章）…'
             : '正在加载文本…'
       await nextTick()
 
@@ -88,7 +97,9 @@ export function useReaderSession(opts: {
         error.value = '阅读器容器未就绪，请刷新重试'
         return
       }
-      await eng.open(blob, settingsStore.settings, opts.host.value)
+      await eng.open(blob, settingsStore.settings, opts.host.value, {
+        initialLocator: saved?.locator,
+      })
       opening.value = false
 
       eng.onProgress?.((p) => {
@@ -113,7 +124,7 @@ export function useReaderSession(opts: {
       void books.touchOpened(b.id)
 
       stats.startSession(b.id)
-      return { book: b, engine: eng }
+      return { book: b, engine: eng, restoredLocator: Boolean(saved?.locator) }
     } catch (err) {
       console.error(err)
       error.value = err instanceof Error ? `打开失败：${err.message}` : '打开文件失败'
@@ -155,6 +166,7 @@ export function useReaderSession(opts: {
     destroy,
     flushProgress,
     enableProgressSave,
+    scheduleSave,
     applySettings,
   }
 }

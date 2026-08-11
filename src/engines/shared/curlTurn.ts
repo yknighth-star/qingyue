@@ -46,6 +46,9 @@ export function createCurlGate() {
     if (busy) return
     setBusy(true)
     const el = container ?? null
+    const safety = window.setTimeout(() => {
+      if (busy) setBusy(false)
+    }, 5000)
     try {
       const isEpub = !!el?.classList.contains('epub-reader')
       if (isEpub) {
@@ -61,6 +64,7 @@ export function createCurlGate() {
         await runDualLayerCurl(el, dir, action)
       }
     } finally {
+      window.clearTimeout(safety)
       setBusy(false)
     }
   }

@@ -68,7 +68,12 @@ export class PdfEngine implements ReaderEngine {
   /** Soft cap so mobile OCR does not run forever on huge scans. */
   private static readonly OCR_PAGE_CAP = 80
 
-  async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
+  async open(
+    blob: Blob,
+    settings: ReaderSettings,
+    container: HTMLElement,
+    opts?: import('./types').OpenBookOptions,
+  ) {
     this.destroy()
     this.container = container
     this.settings = settings
@@ -91,7 +96,11 @@ export class PdfEngine implements ReaderEngine {
       this.revokeSourceUrl()
       throw err
     }
-    this.page = 1
+    const initial = opts?.initialLocator
+    this.page =
+      initial && initial.type === 'pdf' && initial.page
+        ? Math.min(this.pdf.numPages, Math.max(1, Math.floor(initial.page)))
+        : 1
 
     const pages = document.createElement('div')
     pages.className = 'pdf-pages'
@@ -106,6 +115,13 @@ export class PdfEngine implements ReaderEngine {
 
     await this.renderVisible(true)
     this.scrollToPage(this.page)
+    if (initial && initial.type === 'pdf' && initial.yRatio && this.pageTurn === 'scroll') {
+      const el = this.pagesEl.querySelector(`[data-page="${this.page}"]`) as HTMLElement | null
+      if (el && this.pagesEl) {
+        const top = el.offsetTop + el.offsetHeight * Math.min(0.95, Math.max(0, initial.yRatio))
+        this.pagesEl.scrollTop = Math.max(0, top - 8)
+      }
+    }
     this.emitProgress()
     void this.loadOutline()
   }

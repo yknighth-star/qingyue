@@ -19,10 +19,12 @@ import {
 } from '@/utils/colorContrast'
 import { buildSelectionEvent, mapPointToParentViewport, mapRectToParentViewport, selectionRectFromSel } from '@/utils/selectionToolbar'
 import { clearSearchMarks, highlightSearchInRoot } from '@/utils/domHighlight'
+import { revokeFontUrlCache, remapBookCssFonts, rewriteEpubFontUrls } from './epubFontUrls'
 import {
   FULL_ENGINE_CAPABILITIES,
   type ContentGestureEvent,
   type ContentTapEvent,
+  type OpenBookOptions,
   type ReadingProgress,
   type ReaderEngine,
   type SearchOptions,
@@ -32,7 +34,6 @@ import { createCurlGate, createMarkSurface, createSearchHighlightState } from '.
 import { injectCaretSuppression } from '@/utils/suppressCaret'
 import type { MarkHandleRects } from '@/utils/markSelect'
 import { searchEpubBook } from './epubSearch'
-import { revokeFontUrlCache, remapBookCssFonts, rewriteEpubFontUrls } from './epubFontUrls'
 import {
   bindMediaLoadRefit,
   fitMediaInDocument,
@@ -106,7 +107,12 @@ export class EpubEngine implements ReaderEngine {
     },
   })
 
-  async open(blob: Blob, settings: ReaderSettings, container: HTMLElement) {
+  async open(
+    blob: Blob,
+    settings: ReaderSettings,
+    container: HTMLElement,
+    opts?: OpenBookOptions,
+  ) {
     this.destroy()
     this.container = container
     this.settings = { ...settings }
@@ -116,17 +122,12 @@ export class EpubEngine implements ReaderEngine {
     container.dataset.turn = settings.pageTurn
     applyThemeVars(container, effectiveTheme(settings), settings)
 
-    // Blob URLs lack an .epub extension, so epubjs mis-detects type and never finishes
-    // opening. Pass ArrayBuffer so it opens as binary EPUB reliably.
+    // Full blobUrl replacements are required for srcdoc images + CSS columns + reliable next/prev.
+    // Do not reintroduce CSS-only / replacements:none patches — they break pagination.
     const data = await blob.arrayBuffer()
     this.book = ePub(data, { replacements: 'blobUrl' })
     await this.book.opened
     await this.book.ready
-    // Rewrite font urls inside CSS blobs BEFORE first iframe paint (avoids blocked:other).
-    // Do NOT register a serialize hook: epub.js runs serialize hooks in parallel and
-    // whatever finishes last wins — overwriting blob image replacements with relative
-    // paths (broken <img> in about:srcdoc). Fonts are fixed via remapBookCssFonts +
-    // rewriteDocFonts after mount.
     await remapBookCssFonts(this.book, this.fontUrlCache)
     this.spineLength = (this.book.spine as { length?: number }).length || 1
     const nav = this.book.navigation
@@ -136,7 +137,6 @@ export class EpubEngine implements ReaderEngine {
       width: '100%',
       height: '100%',
       flow: settings.pageTurn === 'scroll' ? 'scrolled-doc' : 'paginated',
-      // epub.js default overflow "auto" enables BOTH axes; force scroll+vertical so x stays hidden
       overflow: settings.pageTurn === 'scroll' ? 'scroll' : 'hidden',
       spread:
         settings.dualColumn &&
@@ -144,27 +144,28 @@ export class EpubEngine implements ReaderEngine {
         window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
           ? 'always'
           : 'none',
-      // Dual spread: modest gap for spine breathing room.
-      // Large gap + wrong scroll delta causes bleed — keep this small and tied to dual only.
       gap:
         settings.dualColumn &&
         settings.pageTurn !== 'scroll' &&
         window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
           ? 40
           : 0,
-      // EPUB chapters often include scripts (TOC links, footnotes). Without this,
-      // Chromium blocks them in about:srcdoc sandboxed iframes.
       allowScriptedContent: true,
     })
     this.applyThemeToRendition(settings)
 
-    // Forward wheel/click from chapter iframes to the reader shell (PC UX).
     const hooks = this.rendition as unknown as {
       hooks: { content: { register: (fn: (contents: ContentsDoc) => void) => void } }
     }
     hooks.hooks.content.register((contents) => this.bindContentEvents(contents))
 
-    await this.rendition.display()
+    const initial = opts?.initialLocator
+    const displayTarget =
+      initial && initial.type === 'epub'
+        ? initial.cfi || initial.href || initial.spineIndex
+        : undefined
+    await this.rendition.display(displayTarget)
+
     this.lockEpubHorizontalOverflow()
     this.syncDualColumnAttr(
       settings.dualColumn &&
@@ -182,7 +183,6 @@ export class EpubEngine implements ReaderEngine {
         h: Math.max(64, Math.round(container.clientHeight - pt - pb)),
       }
     }
-    // Content hooks may have run before lastSize was known — refit with real page box.
     this.containOverflowMediaAll()
     this.observeResize(container)
 
@@ -194,18 +194,12 @@ export class EpubEngine implements ReaderEngine {
       const loc = args[0] as EpubRelocatedLoc
       this.spineIndex = loc.start?.index ?? 0
       this.progressCb?.(this.getProgressFromLoc(loc))
-      // Avoid style thrash on every page: lock once; typography only on new iframes (bindContentEvents).
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
-      // Re-assert theme after page turn — publisher CSS/scripts often repaint late on mobile.
-      // Soft path: stylesheet + html/body only (avoids full subtree thrash on dual-column).
       if (this.settings) this.reassertThemeColors(this.settings)
-      // Hard re-fit media every page — publisher scripts / late decode undo caps on mobile.
       this.containOverflowMediaAll()
     })
 
-    // Background location map → stable book-level 当前/总页 (estimate).
-    // Defer on phone/tablet / low-power so first paint and theme wash are not contending.
     this.locationsReady = false
     const gen = ++this.locationsGen
     if (this.locationsTimer) {
@@ -216,7 +210,6 @@ export class EpubEngine implements ReaderEngine {
     const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 8 : 8
     const lite = w < 1100 || cores <= 4
     const delayMs = lite ? 2200 : 600
-    // Larger stride → fewer location points → cheaper generate on weak devices.
     const charsPerLoc = lite ? 2400 : 1600
     this.locationsTimer = window.setTimeout(() => {
       this.locationsTimer = null
@@ -234,7 +227,7 @@ export class EpubEngine implements ReaderEngine {
             this.progressCb?.(this.getProgress())
           })
           .catch(() => {
-            /* optional — fall back to section / spine pages */
+            /* optional */
           })
       }
       if (typeof requestIdleCallback === 'function') {
@@ -925,10 +918,20 @@ export class EpubEngine implements ReaderEngine {
 
   async goTo(locator: Locator) {
     if (locator.type !== 'epub' || !this.rendition) return
-    if (locator.cfi) await this.rendition.display(locator.cfi)
-    else if (locator.href) await this.rendition.display(locator.href)
-    else await this.rendition.display(locator.spineIndex)
+    const rendition = this.rendition
+    const target = locator.cfi || locator.href || locator.spineIndex
+    const display = Promise.resolve(rendition.display(target)).catch((err) => {
+      console.warn('epub goTo display failed', target, err)
+    })
+    // Never hang the shell (目录 panel / chrome) on a stuck section load.
+    await Promise.race([
+      display,
+      new Promise<void>((r) => window.setTimeout(r, 6000)),
+    ])
     await new Promise((r) => window.setTimeout(r, 50))
+    this.overflowLocked = false
+    this.lockEpubHorizontalOverflow()
+    this.snapPaginatedScroll()
     if (this.searchHl.get()) this.applySearchHighlightToContents()
   }
 
@@ -1506,7 +1509,12 @@ html body h6 {
    * CSS-background illustrations and can composite over figures. Only force
    * html/body + solid color washes; leave url(...) backgrounds alone.
    */
-  private applyThemeColorsToDocument(doc: Document, settings: ReaderSettings, force = false) {
+  private applyThemeColorsToDocument(
+    doc: Document,
+    settings: ReaderSettings,
+    force = false,
+    opts?: { deferWashes?: boolean },
+  ) {
     const { theme, bg, fg } = this.themeColors(settings)
     const flow = settings.pageTurn === 'scroll' ? 's' : 'p'
     const fp = `${theme}\0${bg}\0${fg}\0${flow}`
@@ -1531,8 +1539,8 @@ html body h6 {
           body.style.setProperty('background-image', 'none', 'important')
           body.style.setProperty('color', fg, 'important')
           body.style.setProperty('-webkit-text-fill-color', fg, 'important')
-          // Always re-run contrast wash: dark figure bars need light text (soft path too).
-          this.paintPublisherWashes(doc, bg, fg)
+          if (opts?.deferWashes) this.schedulePublisherWashes(doc, bg, fg)
+          else this.paintPublisherWashes(doc, bg, fg)
         }
         this.paintHostSurfaces(doc, bg)
         this.ensureThemeDocGuard(doc)
@@ -1692,7 +1700,8 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         body.style.setProperty('background-image', 'none', 'important')
         body.style.setProperty('color', fg, 'important')
         body.style.setProperty('-webkit-text-fill-color', fg, 'important')
-        this.paintPublisherWashes(doc, bg, fg)
+        if (opts?.deferWashes) this.schedulePublisherWashes(doc, bg, fg)
+        else this.paintPublisherWashes(doc, bg, fg)
       }
       root.dataset.qyTheme = fp
       this.paintHostSurfaces(doc, bg)
@@ -1701,6 +1710,18 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       this.themeApplyDepth -= 1
       // Quiet long enough to absorb MutationObserver + ResizeObserver echoes.
       this.themeQuietUntil = performance.now() + 220
+    }
+  }
+
+  private schedulePublisherWashes(doc: Document, bg: string, fg: string) {
+    const run = () => {
+      if (!doc.defaultView || doc.defaultView.closed) return
+      this.paintPublisherWashes(doc, bg, fg)
+    }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => run(), { timeout: 350 })
+    } else {
+      window.setTimeout(run, 50)
     }
   }
 
@@ -1738,6 +1759,10 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
   ) {
     const lightOnDark = LIGHT_ON_DARK_FG
     let marked = 0
+    let visited = 0
+    const w = typeof window !== 'undefined' ? window.innerWidth : 1200
+    // Cap style walks — full chapter trees with getComputedStyle freeze phones.
+    const maxVisit = w < 768 ? 140 : w < 1100 ? 220 : 360
 
     const isMedia = (tag: string) =>
       tag === 'img' ||
@@ -1775,7 +1800,8 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
      * underDark propagates only from own solid dark fill or full-bleed url bar.
      */
     const walk = (el: HTMLElement, depth: number, underDark: boolean) => {
-      if (depth > 14) return
+      if (depth > 10) return
+      if (++visited > maxVisit) return
       const tag = el.tagName.toLowerCase()
       if (isMedia(tag)) return
       if (el.id === 'qingyue-theme' || el.id === 'qingyue-typography' || el.id === 'qingyue-media-fit') return

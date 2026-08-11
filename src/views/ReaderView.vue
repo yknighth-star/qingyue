@@ -384,8 +384,14 @@ function onProgressKey(e: KeyboardEvent) {
 }
 
 async function goToc(item: TocItem) {
-  await engine.value?.goTo(item.locator)
+  // Close first — turn gestures refuse to run while panel !== 'none'.
+  // If goTo hangs, a stuck open panel would permanently block page turns.
   closePanel()
+  try {
+    await engine.value?.goTo(item.locator)
+  } catch (err) {
+    console.warn('toc jump failed', err)
+  }
 }
 
 function onSearchQuery(value: string) {
@@ -444,15 +450,16 @@ async function boot() {
   const result = await openSession()
   if (!result) return
   const { book: b, engine: eng } = result
-  await loadAnnotations(b.id)
-  const saved = await books.getProgress(b.id)
-  if (saved?.locator) await eng.goTo(saved.locator)
+  // Position already restored inside eng.open({ initialLocator }) — do not goTo again (double load).
   enableProgressSave()
   flushProgress()
   window.setTimeout(() => {
     toc.value = eng.getToc()
   }, 400)
-  eng.applyAnnotations?.(annots.value)
+  // Annotations after first paint — never block entering the reader.
+  void loadAnnotations(b.id).then(() => {
+    eng.applyAnnotations?.(annots.value)
+  })
 }
 
 onMounted(async () => {

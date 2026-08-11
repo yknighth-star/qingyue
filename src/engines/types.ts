@@ -83,9 +83,19 @@ export interface SearchOptions {
   signal?: AbortSignal
 }
 
+export interface OpenBookOptions {
+  /** Restore reading position in the first display() — avoids open-at-start then goTo (double load). */
+  initialLocator?: Locator
+}
+
 export interface ReaderEngine {
   readonly capabilities: EngineCapabilities
-  open(blob: Blob, settings: ReaderSettings, container: HTMLElement): Promise<void>
+  open(
+    blob: Blob,
+    settings: ReaderSettings,
+    container: HTMLElement,
+    opts?: OpenBookOptions,
+  ): Promise<void>
   destroy(): void
   applySettings(settings: ReaderSettings): void
   /** Recompute layout after the reading stage size changes (e.g. chrome show/hide). */
