@@ -34,6 +34,7 @@ import { createCurlGate, createMarkSurface, createSearchHighlightState } from '.
 import { injectCaretSuppression } from '@/utils/suppressCaret'
 import type { MarkHandleRects } from '@/utils/markSelect'
 import { searchEpubBook } from './epubSearch'
+import { detectEpubBookProfile, type EpubBookProfile } from './epubBookProfile'
 import {
   bindMediaLoadRefit,
   fitMediaInDocument,
@@ -97,6 +98,10 @@ export class EpubEngine implements ReaderEngine {
   /** Guard: media-load reflow must not re-enter applyResize recursively. */
   private mediaReflowing = false
   private mediaQuietUntil = 0
+  private bookProfile: EpubBookProfile | null = null
+  /** Coalesced EPUB turns: +next / -prev. Rapid PC wheel must not drop. */
+  private turnPending = 0
+  private turnPump: Promise<void> | null = null
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -131,6 +136,11 @@ export class EpubEngine implements ReaderEngine {
     this.spineLength = (this.book.spine as { length?: number }).length || 1
     const nav = this.book.navigation
     this.toc = flattenNav(nav?.toc || [])
+    const resources = (this.book as Book & { resources?: { urls?: string[]; cssUrls?: string[] } })
+      .resources
+    this.bookProfile = detectEpubBookProfile(this.spineLength, blob.size, resources)
+    // Text novels never need publisher scripts; scripts fight pagination on huge spines.
+    const allowScripts = !this.bookProfile.textNovel
 
     this.rendition = this.book.renderTo(container, {
       width: '100%',
@@ -149,7 +159,7 @@ export class EpubEngine implements ReaderEngine {
         window.innerWidth >= DUAL_COLUMN_MIN_WIDTH
           ? 40
           : 0,
-      allowScriptedContent: true,
+      allowScriptedContent: allowScripts,
     })
     this.applyThemeToRendition(settings)
 
@@ -187,7 +197,7 @@ export class EpubEngine implements ReaderEngine {
         h: Math.max(64, Math.round(container.clientHeight - pt - pb)),
       }
     }
-    this.containOverflowMediaAll()
+    if (!this.bookProfile?.textNovel) this.containOverflowMediaAll()
     this.observeResize(container)
 
     this.curl.onBusyChange((b) => {
@@ -201,19 +211,33 @@ export class EpubEngine implements ReaderEngine {
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
       // Soft theme only — full wash/media fit are deferred (PC illustrated books thrash otherwise).
+      // Text novels: skip wash/media entirely on relocate — spine hops must stay cheap.
+      if (this.bookProfile?.textNovel) {
+        if (this.settings) this.reassertThemeColors(this.settings, { light: true, skipWashes: true })
+        return
+      }
       if (this.settings) this.reassertThemeColors(this.settings, { light: true })
       this.schedulePostRelocateWork()
     })
 
+    this.scheduleLocationsGenerate()
+  }
+
+  /**
+   * Whole-book locations.generate walks every spine item — banned on large CN novels
+   * (e.g. 诡秘之主). Progress falls back to spine index / chapter displayed pages.
+   */
+  private scheduleLocationsGenerate() {
     this.locationsReady = false
     const gen = ++this.locationsGen
     if (this.locationsTimer) {
       window.clearTimeout(this.locationsTimer)
       this.locationsTimer = null
     }
+    if (this.bookProfile?.largeSpine) return
+
     const w = typeof window !== 'undefined' ? window.innerWidth : 1200
     const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 8 : 8
-    // Desktop also defers: locations.generate fights with first turns on large EPUBs.
     const delayMs = w >= 1100 ? 3500 : cores <= 4 ? 2200 : 1200
     const charsPerLoc = w >= 1100 ? 2000 : cores <= 4 ? 2400 : 1600
     this.locationsTimer = window.setTimeout(() => {
@@ -245,6 +269,7 @@ export class EpubEngine implements ReaderEngine {
 
   /** Debounced media fit after page turn — never block the turn gesture. */
   private schedulePostRelocateWork() {
+    if (this.bookProfile?.textNovel) return
     if (this.mediaRefitTimer) window.clearTimeout(this.mediaRefitTimer)
     this.mediaRefitTimer = window.setTimeout(() => {
       this.mediaRefitTimer = null
@@ -491,19 +516,26 @@ export class EpubEngine implements ReaderEngine {
 
     injectCaretSuppression(doc)
 
+    const textNovel = Boolean(this.bookProfile?.textNovel)
     this.normalizeChapterTitles(doc)
     if (this.settings) {
       // Defer contrast wash so first paint / first turn stay responsive on PC.
-      this.applyThemeColorsToDocument(doc, this.settings, true, { deferWashes: true })
+      // Text novels: stylesheet + html/body only — no publisher wash walks / repaint storms.
+      this.applyThemeColorsToDocument(doc, this.settings, true, {
+        deferWashes: true,
+        skipWashes: textNovel,
+      })
       this.applyTypographyToDocument(doc, this.settings)
-      this.scheduleThemeRepaint(doc)
+      if (!textNovel) this.scheduleThemeRepaint(doc)
     }
-    // After theme paint so inline media caps win; re-fit when late images decode.
-    this.containOverflowMedia(doc)
-    const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
-    this.mediaRefitDisposers.push(disposeRefit)
-    // Publisher @font-face relative urls resolve to about:srcdoc and Chrome blocks them.
-    void this.rewriteDocFonts(doc)
+    if (!textNovel) {
+      // After theme paint so inline media caps win; re-fit when late images decode.
+      this.containOverflowMedia(doc)
+      const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
+      this.mediaRefitDisposers.push(disposeRefit)
+      // Publisher @font-face relative urls resolve to about:srcdoc and Chrome blocks them.
+      void this.rewriteDocFonts(doc)
+    }
     this.syncDocTouchAction(doc)
 
     // Re-apply search marks when chapter iframe mounts / remounts
@@ -775,6 +807,9 @@ export class EpubEngine implements ReaderEngine {
     }
     this.book = null
     this.rendition = null
+    this.bookProfile = null
+    this.turnPending = 0
+    this.turnPump = null
     this.locationsReady = false
     this.locationsGen += 1
     if (this.locationsTimer) {
@@ -958,15 +993,37 @@ export class EpubEngine implements ReaderEngine {
   }
 
   async next() {
-    await this.curl.run(this.pageTurn, this.container, 'next', async () => {
-      await this.turnPage('next')
-    })
+    await this.enqueueTurn(1)
   }
 
   async prev() {
-    await this.curl.run(this.pageTurn, this.container, 'prev', async () => {
-      await this.turnPage('prev')
+    await this.enqueueTurn(-1)
+  }
+
+  /**
+   * Coalesce rapid PC wheel / keyboard / touch turns.
+   * Previous curl busy-gate silently dropped input while turnPage awaited relocate —
+   * on 诡秘之主-class books that felt like "cannot turn pages".
+   */
+  private async enqueueTurn(delta: number) {
+    this.turnPending += delta
+    if (this.turnPending > 6) this.turnPending = 6
+    if (this.turnPending < -6) this.turnPending = -6
+    if (this.turnPump) return this.turnPump
+    this.turnPump = this.drainTurns().finally(() => {
+      this.turnPump = null
     })
+    return this.turnPump
+  }
+
+  private async drainTurns() {
+    while (this.turnPending !== 0 && this.rendition) {
+      const dir: 'next' | 'prev' = this.turnPending > 0 ? 'next' : 'prev'
+      this.turnPending += dir === 'next' ? -1 : 1
+      await this.curl.run(this.pageTurn, this.container, dir, async () => {
+        await this.turnPage(dir)
+      })
+    }
   }
 
   /** Advance/rewind and wait until epub.js finishes relocating (layout stable). */
@@ -978,11 +1035,14 @@ export class EpubEngine implements ReaderEngine {
       next: () => Promise<unknown>
       prev: () => Promise<unknown>
     }
+    const textNovel = Boolean(this.bookProfile?.textNovel)
+    // Text novels: shorter relocate wait — chapter hops are frequent; do not pad 400ms+.
+    const relocateCapMs = textNovel ? 180 : 320
     const relocated = new Promise<void>((resolve) => {
       const timer = window.setTimeout(() => {
         rendition.off('relocated', onRelocated)
         resolve()
-      }, 400)
+      }, relocateCapMs)
       const onRelocated = () => {
         window.clearTimeout(timer)
         rendition.off('relocated', onRelocated)
@@ -997,6 +1057,12 @@ export class EpubEngine implements ReaderEngine {
       /* at bound */
     }
     await relocated
+    if (textNovel) {
+      // Single rAF is enough; skip second paint wait + artifact scrub when coalescing.
+      await new Promise<void>((r) => requestAnimationFrame(() => r()))
+      this.snapPaginatedScroll()
+      return
+    }
     // Double-rAF: paint settles, then snap out any mid-column scrollLeft drift.
     await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
     this.snapPaginatedScroll()
@@ -1529,7 +1595,7 @@ html body h6 {
     doc: Document,
     settings: ReaderSettings,
     force = false,
-    opts?: { deferWashes?: boolean },
+    opts?: { deferWashes?: boolean; skipWashes?: boolean },
   ) {
     const { theme, bg, fg } = this.themeColors(settings)
     const flow = settings.pageTurn === 'scroll' ? 's' : 'p'
@@ -1537,6 +1603,7 @@ html body h6 {
     const root = doc.documentElement
     const id = 'qingyue-theme'
     let styleEl = doc.getElementById(id) as HTMLStyleElement | null
+    const skipWashes = Boolean(opts?.skipWashes || this.bookProfile?.textNovel)
 
     this.themeApplyDepth += 1
     try {
@@ -1555,11 +1622,13 @@ html body h6 {
           body.style.setProperty('background-image', 'none', 'important')
           body.style.setProperty('color', fg, 'important')
           body.style.setProperty('-webkit-text-fill-color', fg, 'important')
-          if (opts?.deferWashes) this.schedulePublisherWashes(doc, bg, fg)
-          else this.paintPublisherWashes(doc, bg, fg)
+          if (!skipWashes) {
+            if (opts?.deferWashes) this.schedulePublisherWashes(doc, bg, fg)
+            else this.paintPublisherWashes(doc, bg, fg)
+          }
         }
         this.paintHostSurfaces(doc, bg)
-        this.ensureThemeDocGuard(doc)
+        if (!skipWashes) this.ensureThemeDocGuard(doc)
         return
       }
 
@@ -1716,12 +1785,14 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         body.style.setProperty('background-image', 'none', 'important')
         body.style.setProperty('color', fg, 'important')
         body.style.setProperty('-webkit-text-fill-color', fg, 'important')
-        if (opts?.deferWashes) this.schedulePublisherWashes(doc, bg, fg)
-        else this.paintPublisherWashes(doc, bg, fg)
+        if (!skipWashes) {
+          if (opts?.deferWashes) this.schedulePublisherWashes(doc, bg, fg)
+          else this.paintPublisherWashes(doc, bg, fg)
+        }
       }
       root.dataset.qyTheme = fp
       this.paintHostSurfaces(doc, bg)
-      this.ensureThemeDocGuard(doc)
+      if (!skipWashes) this.ensureThemeDocGuard(doc)
     } finally {
       this.themeApplyDepth -= 1
       // Quiet long enough to absorb MutationObserver + ResizeObserver echoes.
@@ -2043,10 +2114,14 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
 
   /**
    * After page turn: ensure theme stylesheet is last and html/body colors stick.
-   * `light: true` skips the expensive publisher wash walk (use after relocate on PC).
+   * `light: true` defers publisher wash; `skipWashes` skips it entirely (text novels).
    */
-  private reassertThemeColors(settings: ReaderSettings, opts?: { light?: boolean }) {
+  private reassertThemeColors(
+    settings: ReaderSettings,
+    opts?: { light?: boolean; skipWashes?: boolean },
+  ) {
     if (!this.rendition) return
+    const skipWashes = Boolean(opts?.skipWashes || this.bookProfile?.textNovel)
     const { bg, fg, theme } = this.themeColors(settings)
     const flow = settings.pageTurn === 'scroll' ? 's' : 'p'
     const fp = `${theme}\0${bg}\0${fg}\0${flow}`
@@ -2061,6 +2136,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         if (!styleEl || doc.documentElement.dataset.qyTheme !== fp) {
           this.applyThemeColorsToDocument(doc, settings, true, {
             deferWashes: Boolean(opts?.light),
+            skipWashes,
           })
           return
         }
@@ -2076,8 +2152,10 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
             body.style.setProperty('background-color', bg, 'important')
             body.style.setProperty('background-image', 'none', 'important')
             body.style.setProperty('color', fg, 'important')
-            if (!opts?.light) this.paintPublisherWashes(doc, bg, fg)
-            else this.schedulePublisherWashes(doc, bg, fg)
+            if (!skipWashes) {
+              if (!opts?.light) this.paintPublisherWashes(doc, bg, fg)
+              else this.schedulePublisherWashes(doc, bg, fg)
+            }
           }
           this.paintHostSurfaces(doc, bg)
         } finally {
@@ -2323,6 +2401,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
    * Never strip width/height attributes — that collapses many EPUB bitmaps.
    */
   private containOverflowMedia(doc: Document) {
+    if (this.bookProfile?.textNovel) return
     const mode = this.pageTurn === 'scroll' ? 'scroll' : 'paginated'
     // Host stage page box only — never iframe vw (expand() makes vw = full strip).
     let stageW = this.lastSize.w

@@ -7,7 +7,7 @@ import { resolveTurnAnim, resolveTurnProfile, type TurnProfile } from '@/utils/t
  * Shared page-turn animation gate for TXT / PDF / EPUB.
  * - scroll: no chrome animation
  * - slide/curl: dual-layer for TXT/PDF
- * - EPUB: plain swap only (srcdoc plate clone is too heavy on PC/illustrated books)
+ * - EPUB: plain swap (coalescing lives in EpubEngine — never drop rapid input)
  */
 export function createCurlGate() {
   let busy = false
@@ -36,25 +36,20 @@ export function createCurlGate() {
   ): Promise<void> {
     const p = profile ?? resolveTurnProfile()
     const anim = resolveTurnAnim(pageTurn, p)
+    const el = container ?? null
+    const isEpub = !!el?.classList.contains('epub-reader')
 
-    if (anim === 'none') {
+    if (anim === 'none' || isEpub) {
       await action()
       return
     }
+
     if (busy) return
     setBusy(true)
-    const el = container ?? null
     const safety = window.setTimeout(() => {
       if (busy) setBusy(false)
     }, 5000)
     try {
-      const isEpub = !!el?.classList.contains('epub-reader')
-      // EPUB soft-turn clones the whole chapter into a srcdoc plate — freezes PC/图文 books.
-      // Keep pagination correct with a plain swap; TXT/PDF still use dual-layer anim.
-      if (isEpub) {
-        await action()
-        return
-      }
       if (anim === 'slide') {
         await runDualLayerSlide(el, dir, action)
       } else if (anim === 'lite-curl') {
