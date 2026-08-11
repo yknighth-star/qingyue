@@ -287,32 +287,133 @@ export async function mountEpubFrontPaper(
   }
 }
 
-/** @deprecated Prefer mountEpubFrontPaper — kept for isolated self-tests. */
-export async function captureEpubFrontPlate(
+/**
+ * Cover the stage with a static srcdoc snapshot of the current page so epub.js
+ * clear()→append→show chapter hops do not flash an empty container.
+ * Returns a disposer; always call it (even if null).
+ */
+export async function mountEpubChapterHold(
+  surface: HTMLElement,
+): Promise<(() => void) | null> {
+  const host = surface.parentElement
+  if (!host) return null
+  const container = surface.querySelector('.epub-container') as HTMLElement | null
+  const iframe = surface.querySelector('iframe') as HTMLIFrameElement | null
+  const doc = iframe?.contentDocument
+  const bg = resolveReaderBg(surface)
+  if (!container || !iframe || !doc?.body) {
+    // Fallback: solid cover still hides the blank stage (better than empty blink).
+    return mountSolidHold(host, surface, bg)
+  }
+
+  const pageW = container.clientWidth
+  const pageH = container.clientHeight
+  if (pageW < 8 || pageH < 8) return mountSolidHold(host, surface, bg)
+
+  let scrollLeft = container.scrollLeft
+  const snapped = Math.round(scrollLeft / pageW) * pageW
+  if (Math.abs(scrollLeft - snapped) >= 0.5) {
+    scrollLeft = snapped
+  }
+
+  const fullW = Math.max(iframe.offsetWidth || 0, iframe.clientWidth || 0, pageW)
+  const srcdoc = buildSrcdoc(doc, pageW, pageH, fullW, bg)
+  if (!srcdoc) return mountSolidHold(host, surface, bg)
+
+  const sRect = surface.getBoundingClientRect()
+  const hRect = host.getBoundingClientRect()
+  const left = sRect.left - hRect.left
+  const top = sRect.top - hRect.top
+
+  const wrap = document.createElement('div')
+  wrap.className = 'page-epub-chapter-hold'
+  wrap.setAttribute('aria-hidden', 'true')
+  Object.assign(wrap.style, {
+    position: 'absolute',
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${sRect.width}px`,
+    height: `${sRect.height}px`,
+    zIndex: '30',
+    overflow: 'hidden',
+    pointerEvents: 'none',
+    background: bg,
+    // Visible immediately with bg; srcdoc paints over when ready.
+    visibility: 'visible',
+  })
+
+  const plate = document.createElement('div')
+  Object.assign(plate.style, {
+    position: 'absolute',
+    left: `${container.offsetLeft}px`,
+    top: `${container.offsetTop}px`,
+    width: `${pageW}px`,
+    height: `${pageH}px`,
+    overflow: 'hidden',
+    background: bg,
+  })
+
+  const frame = document.createElement('iframe')
+  frame.setAttribute('scrolling', 'no')
+  frame.setAttribute('referrerpolicy', 'no-referrer')
+  Object.assign(frame.style, {
+    width: `${fullW}px`,
+    height: `${pageH}px`,
+    border: '0',
+    display: 'block',
+    background: bg,
+    transform: `translate3d(${-scrollLeft}px,0,0)`,
+    pointerEvents: 'none',
+  })
+  plate.appendChild(frame)
+  wrap.appendChild(plate)
+
+  const prevPos = getComputedStyle(host).position
+  if (prevPos === 'static') host.style.position = 'relative'
+  host.appendChild(wrap)
+
+  try {
+    await waitFrameSrcdoc(frame, srcdoc, 1200)
+    await frames(1)
+  } catch {
+    // Keep solid bg wrap — still covers clear() blank.
+  }
+
+  return () => {
+    wrap.remove()
+    if (prevPos === 'static') host.style.removeProperty('position')
+  }
+}
+
+function mountSolidHold(
+  host: HTMLElement,
   surface: HTMLElement,
   bg: string,
-): Promise<HTMLDivElement | null> {
-  const host = document.body
+): () => void {
   const sRect = surface.getBoundingClientRect()
-  const wrap = await mountEpubFrontPaper(
-    surface,
-    host,
-    { left: -10000, top: 0, width: sRect.width, height: sRect.height },
-    { left: 0, top: 0 },
-    'next',
-    'slide',
-    bg,
-  )
-  if (!wrap) return null
-  const plate = wrap.querySelector('.page-epub-turn-plate') as HTMLDivElement | null
-  if (!plate) {
+  const hRect = host.getBoundingClientRect()
+  const wrap = document.createElement('div')
+  wrap.className = 'page-epub-chapter-hold page-epub-chapter-hold-solid'
+  wrap.setAttribute('aria-hidden', 'true')
+  Object.assign(wrap.style, {
+    position: 'absolute',
+    left: `${sRect.left - hRect.left}px`,
+    top: `${sRect.top - hRect.top}px`,
+    width: `${sRect.width}px`,
+    height: `${sRect.height}px`,
+    zIndex: '30',
+    pointerEvents: 'none',
+    background: bg,
+  })
+  const prevPos = getComputedStyle(host).position
+  if (prevPos === 'static') host.style.position = 'relative'
+  host.appendChild(wrap)
+  return () => {
     wrap.remove()
-    return null
+    if (prevPos === 'static') host.style.removeProperty('position')
   }
-  // Returning a detached plate would blank the iframe — leave wrap in place for tests
-  // that inspect the iframe in situ. Callers that need a node should use mountEpubFrontPaper.
-  return plate
 }
+
 
 function animateFrontAway(
   paper: HTMLElement,

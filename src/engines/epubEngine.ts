@@ -35,6 +35,7 @@ import { injectCaretSuppression } from '@/utils/suppressCaret'
 import type { MarkHandleRects } from '@/utils/markSelect'
 import { searchEpubBook } from './epubSearch'
 import { detectEpubBookProfile, type EpubBookProfile } from './epubBookProfile'
+import { mountEpubChapterHold } from '@/utils/pageEpubTurn'
 import {
   bindMediaLoadRefit,
   fitMediaInDocument,
@@ -106,6 +107,8 @@ export class EpubEngine implements ReaderEngine {
   private turning = false
   /** After turn settle: ignore snap/lock on echo relocates (SCROLLED → reportLocation). */
   private turnSettleUntil = 0
+  /** Chapter-hop hold plate is up — defer late theme/media until dispose. */
+  private chapterHolding = false
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -270,13 +273,90 @@ export class EpubEngine implements ReaderEngine {
 
   /** Debounced media fit after page turn — never block the turn gesture. */
   private schedulePostRelocateWork() {
-    if (this.bookProfile?.textNovel) return
+    if (this.bookProfile?.textNovel || this.chapterHolding) return
     if (this.mediaRefitTimer) window.clearTimeout(this.mediaRefitTimer)
     this.mediaRefitTimer = window.setTimeout(() => {
       this.mediaRefitTimer = null
-      if (this.layoutLocked) return
+      if (this.layoutLocked || this.chapterHolding) return
       this.containOverflowMediaAll()
     }, 120)
+  }
+
+  /** True when next/prev will load another spine item (epub.js clear() blank gap). */
+  private willCrossSpine(dir: 'next' | 'prev'): boolean {
+    const mgr = (
+      this.rendition as unknown as {
+        manager?: {
+          isPaginated?: boolean
+          container?: HTMLElement
+          layout?: { delta: number; height: number }
+          settings?: { axis?: string; direction?: string; rtlScrollType?: string }
+          views?: { length: number; last: () => { section: { next: () => unknown } }; first: () => { section: { prev: () => unknown } } }
+        }
+      }
+    )?.manager
+    if (!mgr?.container || !mgr.views?.length || !mgr.layout) return false
+    if (!mgr.isPaginated) {
+      return dir === 'next'
+        ? Boolean(mgr.views.last()?.section?.next?.())
+        : Boolean(mgr.views.first()?.section?.prev?.())
+    }
+    const c = mgr.container
+    const axis = mgr.settings?.axis || 'horizontal'
+    const direction = mgr.settings?.direction || 'ltr'
+    if (axis === 'horizontal' && direction === 'ltr') {
+      if (dir === 'next') {
+        const left = c.scrollLeft + c.offsetWidth + mgr.layout.delta
+        return left > c.scrollWidth && Boolean(mgr.views.last()?.section?.next?.())
+      }
+      return c.scrollLeft <= 0 && Boolean(mgr.views.first()?.section?.prev?.())
+    }
+    if (axis === 'horizontal' && direction === 'rtl') {
+      if (mgr.settings?.rtlScrollType === 'default') {
+        if (dir === 'next') return c.scrollLeft <= 0 && Boolean(mgr.views.last()?.section?.next?.())
+        return (
+          c.scrollLeft + c.offsetWidth >= c.scrollWidth &&
+          Boolean(mgr.views.first()?.section?.prev?.())
+        )
+      }
+      if (dir === 'next') {
+        const left = c.scrollLeft + mgr.layout.delta * -1
+        return left <= c.scrollWidth * -1 && Boolean(mgr.views.last()?.section?.next?.())
+      }
+      return c.scrollLeft >= 0 && Boolean(mgr.views.first()?.section?.prev?.())
+    }
+    if (axis === 'vertical') {
+      if (dir === 'next') {
+        return (
+          c.scrollTop + c.offsetHeight >= c.scrollHeight &&
+          Boolean(mgr.views.last()?.section?.next?.())
+        )
+      }
+      return c.scrollTop <= 0 && Boolean(mgr.views.first()?.section?.prev?.())
+    }
+    return dir === 'next'
+      ? Boolean(mgr.views.last()?.section?.next?.())
+      : Boolean(mgr.views.first()?.section?.prev?.())
+  }
+
+  private waitRenditionEvent(event: 'relocated' | 'rendered', capMs: number): Promise<void> {
+    const rendition = this.rendition as unknown as {
+      on: (e: string, fn: (...args: unknown[]) => void) => void
+      off: (e: string, fn: (...args: unknown[]) => void) => void
+    } | null
+    if (!rendition) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const timer = window.setTimeout(() => {
+        rendition.off(event, onEv)
+        resolve()
+      }, capMs)
+      const onEv = () => {
+        window.clearTimeout(timer)
+        rendition.off(event, onEv)
+        resolve()
+      }
+      rendition.on(event, onEv)
+    })
   }
 
   /**
@@ -829,6 +909,7 @@ export class EpubEngine implements ReaderEngine {
     this.turnPump = null
     this.turning = false
     this.turnSettleUntil = 0
+    this.chapterHolding = false
     this.layoutLocked = false
     this.locationsReady = false
     this.locationsGen += 1
@@ -1050,32 +1131,36 @@ export class EpubEngine implements ReaderEngine {
   private async turnPage(dir: 'next' | 'prev') {
     if (!this.rendition) return
     const rendition = this.rendition as unknown as {
-      on: (e: string, fn: () => void) => void
-      off: (e: string, fn: () => void) => void
       next: () => Promise<unknown>
       prev: () => Promise<unknown>
     }
     const textNovel = Boolean(this.bookProfile?.textNovel)
-    // Text novels: shorter relocate wait — chapter hops are frequent; do not pad 400ms+.
-    const relocateCapMs = textNovel ? 160 : 280
+    const crossSpine = this.willCrossSpine(dir)
+    // Within-chapter: short relocate wait. Chapter hop: wait for RENDERED (after theme hook).
+    const settleCapMs = crossSpine ? (textNovel ? 1800 : 2500) : textNovel ? 160 : 280
+
     this.turning = true
     this.layoutLocked = true
-    const relocated = new Promise<void>((resolve) => {
-      const timer = window.setTimeout(() => {
-        rendition.off('relocated', onRelocated)
-        resolve()
-      }, relocateCapMs)
-      const onRelocated = () => {
-        window.clearTimeout(timer)
-        rendition.off('relocated', onRelocated)
-        resolve()
-      }
-      rendition.on('relocated', onRelocated)
-    })
+    let disposeHold: (() => void) | null = null
+
     try {
+      if (crossSpine && this.container) {
+        this.chapterHolding = true
+        try {
+          disposeHold = await mountEpubChapterHold(this.container)
+        } catch {
+          disposeHold = null
+        }
+      }
+
+      const settled = crossSpine
+        ? this.waitRenditionEvent('rendered', settleCapMs)
+        : this.waitRenditionEvent('relocated', settleCapMs)
+
       if (dir === 'next') await rendition.next()
       else await rendition.prev()
-      await relocated
+      await settled
+
       // One paint settle + one silent snap — never theme/lock again here.
       await new Promise<void>((r) => requestAnimationFrame(() => r()))
       this.snapPaginatedScroll()
@@ -1083,10 +1168,12 @@ export class EpubEngine implements ReaderEngine {
     } catch {
       /* at bound / destroyed */
     } finally {
+      disposeHold?.()
+      this.chapterHolding = false
       this.turning = false
       this.layoutLocked = false
       // Cover SCROLLED(20ms) + queued reportLocation rAF if anything still echoed.
-      this.turnSettleUntil = performance.now() + 100
+      this.turnSettleUntil = performance.now() + (crossSpine ? 160 : 100)
     }
   }
 
@@ -2157,7 +2244,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
   }
 
   private scheduleThemeRepaint(doc: Document) {
-    if (!this.settings) return
+    if (!this.settings || this.chapterHolding) return
     const settings = this.settings
     const w = typeof window !== 'undefined' ? window.innerWidth : 1200
     // PC: fewer late washes — illustrated chapters already cost a lot on first paint.
@@ -2166,6 +2253,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       const timer = window.setTimeout(() => {
         this.themeRepaintTimers = this.themeRepaintTimers.filter((t) => t !== timer)
         if (!this.settings || this.settings !== settings) return
+        if (this.chapterHolding) return
         if (!doc.defaultView || doc.defaultView.closed) return
         this.applyThemeColorsToDocument(doc, settings, i === 0, {
           deferWashes: i > 0 || w >= 1100,
