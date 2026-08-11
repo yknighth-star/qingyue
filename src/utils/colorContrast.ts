@@ -601,10 +601,10 @@ export function elementOverlapsDarkBackdrop(el: HTMLElement, win: Window): boole
 
   let node: HTMLElement | null = el
   for (let depth = 0; depth < 8 && node; depth++) {
-    const parent = node.parentElement
+    const parent: HTMLElement | null = node.parentElement
     if (!parent || parent === el.ownerDocument.body) break
 
-    for (const sib of Array.from(parent.children)) {
+    for (const sib of Array.from(parent.children) as Element[]) {
       if (!isHtmlElement(sib) || sib === node) continue
       const tag = sib.tagName.toLowerCase()
       if (tag === 'script' || tag === 'style' || tag === 'br' || tag === 'hr') continue
