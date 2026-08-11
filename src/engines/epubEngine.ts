@@ -104,6 +104,8 @@ export class EpubEngine implements ReaderEngine {
   private turnPump: Promise<void> | null = null
   /** True while next/prev is in flight — relocate must not re-theme / re-snap (double flash). */
   private turning = false
+  /** After turn settle: ignore snap/lock on echo relocates (SCROLLED → reportLocation). */
+  private turnSettleUntil = 0
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -210,9 +212,9 @@ export class EpubEngine implements ReaderEngine {
       const loc = args[0] as EpubRelocatedLoc
       this.spineIndex = loc.start?.index ?? 0
       this.progressCb?.(this.getProgressFromLoc(loc))
-      // During next/prev: only report progress. Theme/snap/lock here + again in turnPage
-      // caused the visible double flash / bounce on every turn (esp. text novels).
-      if (this.turning) return
+      // During / just after next/prev: progress only. Echo relocates from snap/SCROLLED
+      // used to re-snap and read as a second flash.
+      if (this.turning || performance.now() < this.turnSettleUntil) return
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
       // Theme lives in bindContentEvents (new iframe) + settings apply — not every column hop.
@@ -399,6 +401,7 @@ export class EpubEngine implements ReaderEngine {
   /**
    * Paginated EPUB: snap .epub-container.scrollLeft to whole pages.
    * Sub-pixel drift after many turns shows adjacent-column glyph slivers on both edges.
+   * Uses epub.js manager.ignore so the scroll event does not emit SCROLLED → relocated echo.
    */
   private snapPaginatedScroll() {
     if (this.pageTurn === 'scroll') return
@@ -412,9 +415,22 @@ export class EpubEngine implements ReaderEngine {
     const raw = scroller.scrollLeft
     const snapped = Math.min(max, Math.max(0, Math.round(raw / pageW) * pageW))
     // Ignore sub-pixel drift — snapping 0.5px fights epub.js and reads as bounce.
-    if (Math.abs(raw - snapped) >= 2) {
+    if (Math.abs(raw - snapped) < 2) return
+    this.withSilentEpubScroll(() => {
       scroller.scrollLeft = snapped
-    }
+    })
+  }
+
+  /**
+   * Match epub.js scrollBy(..., silent): set manager.ignore so onScroll skips SCROLLED.
+   * Assignment to scrollLeft fires scroll synchronously; ignore is consumed in that handler.
+   */
+  private withSilentEpubScroll(fn: () => void) {
+    const mgr = (
+      this.rendition as unknown as { manager?: { ignore?: boolean } } | null
+    )?.manager
+    if (mgr) mgr.ignore = true
+    fn()
   }
 
   /** Kill horizontal scrollbars that epub.js "overflow: auto" otherwise enables. */
@@ -511,10 +527,12 @@ export class EpubEngine implements ReaderEngine {
     if (!doc || this.boundDocs.has(doc)) return
     this.boundDocs.add(doc)
 
+    // First: shell colors before publisher CSS / title walks paint (kills chapter-hop flash).
+    if (this.settings) this.paintDocShell(doc, this.settings)
+
     injectCaretSuppression(doc)
 
     const textNovel = Boolean(this.bookProfile?.textNovel)
-    this.normalizeChapterTitles(doc)
     if (this.settings) {
       // Defer contrast wash so first paint / first turn stay responsive on PC.
       // Text novels: stylesheet + html/body only — no publisher wash walks / repaint storms.
@@ -525,6 +543,8 @@ export class EpubEngine implements ReaderEngine {
       this.applyTypographyToDocument(doc, this.settings)
       if (!textNovel) this.scheduleThemeRepaint(doc)
     }
+    // After theme so title centering does not flash unthemed publisher layout first.
+    this.normalizeChapterTitles(doc)
     if (!textNovel) {
       // After theme paint so inline media caps win; re-fit when late images decode.
       this.containOverflowMedia(doc)
@@ -808,6 +828,7 @@ export class EpubEngine implements ReaderEngine {
     this.turnPending = 0
     this.turnPump = null
     this.turning = false
+    this.turnSettleUntil = 0
     this.layoutLocked = false
     this.locationsReady = false
     this.locationsGen += 1
@@ -1055,7 +1076,7 @@ export class EpubEngine implements ReaderEngine {
       if (dir === 'next') await rendition.next()
       else await rendition.prev()
       await relocated
-      // One paint settle + one snap — never theme/lock again here (that was the double flash).
+      // One paint settle + one silent snap — never theme/lock again here.
       await new Promise<void>((r) => requestAnimationFrame(() => r()))
       this.snapPaginatedScroll()
       if (!textNovel) this.clearTurnArtifacts()
@@ -1064,6 +1085,8 @@ export class EpubEngine implements ReaderEngine {
     } finally {
       this.turning = false
       this.layoutLocked = false
+      // Cover SCROLLED(20ms) + queued reportLocation rAF if anything still echoed.
+      this.turnSettleUntil = performance.now() + 100
     }
   }
 
@@ -2073,6 +2096,40 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       }, ms)
       this.themeRepaintTimers.push(timer)
     }
+  }
+
+  /**
+   * Cheap shell paint before full theme sheet — must run first on new chapter iframes
+   * so the first frame is already reader bg/fg (no publisher flash then theme flash).
+   */
+  private paintDocShell(doc: Document, settings: ReaderSettings) {
+    const { bg, fg } = this.themeColors(settings)
+    const root = doc.documentElement
+    if (root) {
+      root.style.setProperty('background-color', bg, 'important')
+      root.style.setProperty('background-image', 'none', 'important')
+      root.style.setProperty('color', fg, 'important')
+    }
+    const body = doc.body
+    if (body) {
+      body.style.setProperty('background-color', bg, 'important')
+      body.style.setProperty('background-image', 'none', 'important')
+      body.style.setProperty('color', fg, 'important')
+    }
+    try {
+      let boot = doc.getElementById('qingyue-boot') as HTMLStyleElement | null
+      if (!boot) {
+        boot = doc.createElement('style')
+        boot.id = 'qingyue-boot'
+        const parent = doc.head || root
+        if (parent) parent.insertBefore(boot, parent.firstChild)
+      }
+      boot.textContent =
+        `html,body{background-color:${bg}!important;background-image:none!important;color:${fg}!important;}`
+    } catch {
+      /* */
+    }
+    this.paintHostSurfaces(doc, bg)
   }
 
   /** Match iframe / epub-view chrome to theme — gaps around columns show host bg. */
