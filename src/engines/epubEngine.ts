@@ -35,7 +35,6 @@ import { injectCaretSuppression } from '@/utils/suppressCaret'
 import type { MarkHandleRects } from '@/utils/markSelect'
 import { searchEpubBook } from './epubSearch'
 import { detectEpubBookProfile, type EpubBookProfile } from './epubBookProfile'
-import { mountEpubChapterHold } from '@/utils/pageEpubTurn'
 import {
   bindMediaLoadRefit,
   fitMediaInDocument,
@@ -107,11 +106,13 @@ export class EpubEngine implements ReaderEngine {
   private turning = false
   /** After turn settle: ignore snap/lock on echo relocates (SCROLLED → reportLocation). */
   private turnSettleUntil = 0
-  /** Chapter-hop hold plate is up — defer late theme/media until dispose. */
-  private chapterHolding = false
-  /** Docs that need idle wash/media after illustrated chapter hold ends. */
-  private postHoldDocs = new Set<Document>()
-  private postHoldFlushTimer: number | null = null
+  /**
+   * Chapter hop: skip epub.js clear() so the old view stays painted until the new
+   * section is RENDERED — then remove stale views (no overlay plate).
+   */
+  private swapKeepOld = false
+  private swapOldViews: unknown[] = []
+  private swapClearOrig: (() => void) | null = null
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -177,6 +178,7 @@ export class EpubEngine implements ReaderEngine {
       hooks: { content: { register: (fn: (contents: ContentsDoc) => void) => void } }
     }
     hooks.hooks.content.register((contents) => this.bindContentEvents(contents))
+    this.installChapterSwapGuard()
 
     const initial = opts?.initialLocator
     const displayTarget =
@@ -224,13 +226,75 @@ export class EpubEngine implements ReaderEngine {
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
       // Theme lives in bindContentEvents (new iframe) + settings apply — not every column hop.
-      // Illustrated large-spine (明朝): media refit after every relocate is the second flash.
-      if (!this.bookProfile?.textNovel && !this.bookProfile?.illustratedLarge) {
-        this.schedulePostRelocateWork()
-      }
+      // Large-spine books (诡秘 / 明朝): media refit after relocate is a second flash.
+      if (!this.bookProfile?.largeSpine) this.schedulePostRelocateWork()
     })
 
     this.scheduleLocationsGenerate()
+  }
+
+  /** Keep old chapter painted during spine hop — epub.js otherwise clear()s to blank. */
+  private installChapterSwapGuard() {
+    const mgr = (
+      this.rendition as unknown as {
+        manager?: {
+          clear?: () => void
+          views?: { all?: () => unknown[] }
+          __qySwapGuard?: boolean
+        }
+      }
+    )?.manager
+    if (!mgr?.clear || mgr.__qySwapGuard) return
+    mgr.__qySwapGuard = true
+    this.swapClearOrig = mgr.clear.bind(mgr)
+    mgr.clear = () => {
+      if (!this.swapKeepOld) {
+        this.swapClearOrig?.()
+        return
+      }
+      try {
+        this.swapOldViews = mgr.views?.all?.()?.slice?.() || []
+      } catch {
+        this.swapOldViews = []
+      }
+      // Intentionally skip hide/scrollTo/destroy — old page stays on screen.
+    }
+  }
+
+  private finishChapterSwap(dir: 'next' | 'prev') {
+    const mgr = (
+      this.rendition as unknown as {
+        manager?: {
+          views?: {
+            all?: () => unknown[]
+            remove?: (view: unknown) => void
+          }
+          scrollTo?: (x: number, y: number, silent?: boolean) => void
+          container?: HTMLElement
+          layout?: { delta: number }
+        }
+      }
+    )?.manager
+    const olds = this.swapOldViews
+    this.swapOldViews = []
+    if (!mgr) return
+    for (const v of olds) {
+      try {
+        mgr.views?.remove?.(v)
+      } catch {
+        /* already gone */
+      }
+    }
+    try {
+      if (dir === 'next') {
+        mgr.scrollTo?.(0, 0, true)
+      } else if (mgr.container && mgr.layout) {
+        const x = Math.max(0, mgr.container.scrollWidth - mgr.layout.delta)
+        mgr.scrollTo?.(x, 0, true)
+      }
+    } catch {
+      /* */
+    }
   }
 
   /**
@@ -279,11 +343,11 @@ export class EpubEngine implements ReaderEngine {
 
   /** Debounced media fit after page turn — never block the turn gesture. */
   private schedulePostRelocateWork() {
-    if (this.bookProfile?.textNovel || this.chapterHolding) return
+    if (this.bookProfile?.largeSpine) return
     if (this.mediaRefitTimer) window.clearTimeout(this.mediaRefitTimer)
     this.mediaRefitTimer = window.setTimeout(() => {
       this.mediaRefitTimer = null
-      if (this.layoutLocked || this.chapterHolding) return
+      if (this.layoutLocked || this.turning) return
       this.containOverflowMediaAll()
     }, 120)
   }
@@ -620,29 +684,40 @@ export class EpubEngine implements ReaderEngine {
 
     const textNovel = Boolean(this.bookProfile?.textNovel)
     const illustratedLarge = Boolean(this.bookProfile?.illustratedLarge)
-    // Under hold / text-novel: no wash storm on first paint.
-    // Illustrated-large (明朝): also skip sync washes — idle polish after reveal.
-    const skipWashesNow = textNovel || illustratedLarge || this.chapterHolding
     if (this.settings) {
+      // Large illustrated spines (明朝): one sync theme pass — no multi-tick repaint storm.
       this.applyThemeColorsToDocument(doc, this.settings, true, {
-        deferWashes: true,
-        skipWashes: skipWashesNow,
+        deferWashes: !illustratedLarge && !textNovel,
+        skipWashes: textNovel,
       })
       this.applyTypographyToDocument(doc, this.settings)
-      if (!textNovel && !illustratedLarge && !this.chapterHolding) {
-        this.scheduleThemeRepaint(doc)
-      }
+      if (!textNovel && !illustratedLarge) this.scheduleThemeRepaint(doc)
     }
     // After theme so title centering does not flash unthemed publisher layout first.
     this.normalizeChapterTitles(doc)
-    if (illustratedLarge) {
-      this.postHoldDocs.add(doc)
-      if (!this.chapterHolding) this.armPostHoldFlush()
-    } else if (!textNovel) {
+    if (!textNovel) {
       this.containOverflowMedia(doc)
-      const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
-      this.mediaRefitDisposers.push(disposeRefit)
-      void this.rewriteDocFonts(doc)
+      if (!illustratedLarge) {
+        const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
+        this.mediaRefitDisposers.push(disposeRefit)
+        void this.rewriteDocFonts(doc)
+      } else {
+        // Fonts/refit off the critical path — never stack on the turn frame.
+        const settings = this.settings
+        const run = () => {
+          if (!this.settings || this.settings !== settings) return
+          if (this.turning || this.swapKeepOld) return
+          if (!doc.defaultView || doc.defaultView.closed) return
+          const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
+          this.mediaRefitDisposers.push(disposeRefit)
+          void this.rewriteDocFonts(doc)
+        }
+        if (typeof requestIdleCallback === 'function') {
+          requestIdleCallback(() => run(), { timeout: 1200 })
+        } else {
+          window.setTimeout(run, 400)
+        }
+      }
     }
     this.syncDocTouchAction(doc)
 
@@ -920,12 +995,9 @@ export class EpubEngine implements ReaderEngine {
     this.turnPump = null
     this.turning = false
     this.turnSettleUntil = 0
-    this.chapterHolding = false
-    this.postHoldDocs.clear()
-    if (this.postHoldFlushTimer != null) {
-      window.clearTimeout(this.postHoldFlushTimer)
-      this.postHoldFlushTimer = null
-    }
+    this.swapKeepOld = false
+    this.swapOldViews = []
+    this.swapClearOrig = null
     this.layoutLocked = false
     this.locationsReady = false
     this.locationsGen += 1
@@ -1153,23 +1225,20 @@ export class EpubEngine implements ReaderEngine {
     const textNovel = Boolean(this.bookProfile?.textNovel)
     const illustratedLarge = Boolean(this.bookProfile?.illustratedLarge)
     const crossSpine = this.willCrossSpine(dir)
-    // Within-chapter: short relocate wait. Chapter hop: wait for RENDERED (after theme hook).
-    const settleCapMs = crossSpine ? (textNovel ? 1800 : 2500) : textNovel ? 160 : 280
+    const settleCapMs = crossSpine
+      ? illustratedLarge || textNovel
+        ? 2000
+        : 2500
+      : textNovel || illustratedLarge
+        ? 160
+        : 280
 
     this.turning = true
     this.layoutLocked = true
-    let disposeHold: (() => void) | null = null
+    this.swapKeepOld = crossSpine
+    this.swapOldViews = []
 
     try {
-      if (crossSpine && this.container) {
-        this.chapterHolding = true
-        try {
-          disposeHold = await mountEpubChapterHold(this.container)
-        } catch {
-          disposeHold = null
-        }
-      }
-
       const settled = crossSpine
         ? this.waitRenditionEvent('rendered', settleCapMs)
         : this.waitRenditionEvent('relocated', settleCapMs)
@@ -1178,70 +1247,37 @@ export class EpubEngine implements ReaderEngine {
       else await rendition.prev()
       await settled
 
-      // Two frames after RENDERED so new iframe theme shell can composite under the hold.
-      await new Promise<void>((r) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => r())),
-      )
+      await new Promise<void>((r) => requestAnimationFrame(() => r()))
+      if (crossSpine) this.finishChapterSwap(dir)
       this.snapPaginatedScroll()
       if (!textNovel && !illustratedLarge) this.clearTurnArtifacts()
     } catch {
       /* at bound / destroyed */
     } finally {
-      disposeHold?.()
-      this.chapterHolding = false
+      if (this.swapOldViews.length) {
+        const mgr = (
+          this.rendition as unknown as {
+            manager?: { views?: { all?: () => unknown[] } }
+          }
+        )?.manager
+        const all = mgr?.views?.all?.() || []
+        const olds = this.swapOldViews
+        const hasNew = all.some((v) => !olds.includes(v))
+        if (hasNew) {
+          try {
+            this.finishChapterSwap(dir)
+          } catch {
+            this.swapClearOrig?.()
+          }
+        } else {
+          // Append failed — keep the still-visible old chapter.
+          this.swapOldViews = []
+        }
+      }
+      this.swapKeepOld = false
       this.turning = false
       this.layoutLocked = false
-      // Illustrated large-spine: long settle so post-hold wash/media do not stack on reveal.
-      this.turnSettleUntil =
-        performance.now() + (crossSpine ? (illustratedLarge ? 420 : 160) : 100)
-      if (illustratedLarge && crossSpine) this.flushPostHoldWork()
-    }
-  }
-
-  private armPostHoldFlush() {
-    if (this.postHoldFlushTimer != null) return
-    this.postHoldFlushTimer = window.setTimeout(() => {
-      this.postHoldFlushTimer = null
-      if (this.chapterHolding || this.turning) {
-        this.armPostHoldFlush()
-        return
-      }
-      this.flushPostHoldWork()
-    }, 360)
-  }
-
-  /**
-   * After chapter hold reveal: one quiet idle pass for washes/media/fonts.
-   * Must not run while the hold plate is up or on the same frame as dispose.
-   */
-  private flushPostHoldWork() {
-    if (this.postHoldFlushTimer != null) {
-      window.clearTimeout(this.postHoldFlushTimer)
-      this.postHoldFlushTimer = null
-    }
-    const docs = [...this.postHoldDocs]
-    this.postHoldDocs.clear()
-    if (!docs.length || !this.settings) return
-    const settings = this.settings
-    const run = () => {
-      if (!this.settings || this.settings !== settings) return
-      if (this.chapterHolding || this.turning) return
-      for (const doc of docs) {
-        if (!doc.defaultView || doc.defaultView.closed) continue
-        this.applyThemeColorsToDocument(doc, settings, false, {
-          deferWashes: false,
-          skipWashes: false,
-        })
-        this.containOverflowMedia(doc)
-        const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
-        this.mediaRefitDisposers.push(disposeRefit)
-        void this.rewriteDocFonts(doc)
-      }
-    }
-    if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(() => run(), { timeout: 800 })
-    } else {
-      window.setTimeout(run, 320)
+      this.turnSettleUntil = performance.now() + (crossSpine ? 140 : 100)
     }
   }
 
@@ -2312,7 +2348,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
   }
 
   private scheduleThemeRepaint(doc: Document) {
-    if (!this.settings || this.chapterHolding) return
+    if (!this.settings) return
     const settings = this.settings
     const w = typeof window !== 'undefined' ? window.innerWidth : 1200
     // PC: fewer late washes — illustrated chapters already cost a lot on first paint.
@@ -2321,7 +2357,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       const timer = window.setTimeout(() => {
         this.themeRepaintTimers = this.themeRepaintTimers.filter((t) => t !== timer)
         if (!this.settings || this.settings !== settings) return
-        if (this.chapterHolding) return
+        if (this.turning || this.swapKeepOld) return
         if (!doc.defaultView || doc.defaultView.closed) return
         this.applyThemeColorsToDocument(doc, settings, i === 0, {
           deferWashes: i > 0 || w >= 1100,
