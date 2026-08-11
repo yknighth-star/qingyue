@@ -1,15 +1,13 @@
 import type { PageTurnMode } from '@/types'
 import { runDualLayerCurl, runDualLayerLiteCurl } from '@/utils/pageCurl'
-import { runEpubSoftTurn } from '@/utils/pageEpubTurn'
 import { runDualLayerSlide } from '@/utils/pageSlide'
 import { resolveTurnAnim, resolveTurnProfile, type TurnProfile } from '@/utils/turnProfile'
 
 /**
  * Shared page-turn animation gate for TXT / PDF / EPUB.
  * - scroll: no chrome animation
- * - slide: dual-layer translate
- * - lite-curl / curl: peel animations (never silently equal to slide)
- * - EPUB: dual-buffer peel/slide (front text plate; live surface hidden during swap)
+ * - slide/curl: dual-layer for TXT/PDF
+ * - EPUB: plain swap only (srcdoc plate clone is too heavy on PC/illustrated books)
  */
 export function createCurlGate() {
   let busy = false
@@ -51,9 +49,10 @@ export function createCurlGate() {
     }, 5000)
     try {
       const isEpub = !!el?.classList.contains('epub-reader')
+      // EPUB soft-turn clones the whole chapter into a srcdoc plate — freezes PC/图文 books.
+      // Keep pagination correct with a plain swap; TXT/PDF still use dual-layer anim.
       if (isEpub) {
-        const skin = anim === 'slide' ? 'slide' : 'curl'
-        await runEpubSoftTurn(el, dir, action, skin)
+        await action()
         return
       }
       if (anim === 'slide') {

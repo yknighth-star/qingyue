@@ -128,7 +128,6 @@ export class EpubEngine implements ReaderEngine {
     this.book = ePub(data, { replacements: 'blobUrl' })
     await this.book.opened
     await this.book.ready
-    await remapBookCssFonts(this.book, this.fontUrlCache)
     this.spineLength = (this.book.spine as { length?: number }).length || 1
     const nav = this.book.navigation
     this.toc = flattenNav(nav?.toc || [])
@@ -166,6 +165,11 @@ export class EpubEngine implements ReaderEngine {
         : undefined
     await this.rendition.display(displayTarget)
 
+    // Fonts can wait until after first page is interactive (rewriteDocFonts also runs on mount).
+    void remapBookCssFonts(this.book, this.fontUrlCache).catch((err) => {
+      console.warn('epub css font remap failed', err)
+    })
+
     this.lockEpubHorizontalOverflow()
     this.syncDualColumnAttr(
       settings.dualColumn &&
@@ -196,8 +200,9 @@ export class EpubEngine implements ReaderEngine {
       this.progressCb?.(this.getProgressFromLoc(loc))
       this.lockEpubHorizontalOverflow()
       this.snapPaginatedScroll()
-      if (this.settings) this.reassertThemeColors(this.settings)
-      this.containOverflowMediaAll()
+      // Soft theme only — full wash/media fit are deferred (PC illustrated books thrash otherwise).
+      if (this.settings) this.reassertThemeColors(this.settings, { light: true })
+      this.schedulePostRelocateWork()
     })
 
     this.locationsReady = false
@@ -208,9 +213,9 @@ export class EpubEngine implements ReaderEngine {
     }
     const w = typeof window !== 'undefined' ? window.innerWidth : 1200
     const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 8 : 8
-    const lite = w < 1100 || cores <= 4
-    const delayMs = lite ? 2200 : 600
-    const charsPerLoc = lite ? 2400 : 1600
+    // Desktop also defers: locations.generate fights with first turns on large EPUBs.
+    const delayMs = w >= 1100 ? 3500 : cores <= 4 ? 2200 : 1200
+    const charsPerLoc = w >= 1100 ? 2000 : cores <= 4 ? 2400 : 1600
     this.locationsTimer = window.setTimeout(() => {
       this.locationsTimer = null
       if (gen !== this.locationsGen || !this.book) return
@@ -231,11 +236,21 @@ export class EpubEngine implements ReaderEngine {
           })
       }
       if (typeof requestIdleCallback === 'function') {
-        requestIdleCallback(() => start(), { timeout: 2000 })
+        requestIdleCallback(() => start(), { timeout: 2500 })
       } else {
         start()
       }
     }, delayMs)
+  }
+
+  /** Debounced media fit after page turn — never block the turn gesture. */
+  private schedulePostRelocateWork() {
+    if (this.mediaRefitTimer) window.clearTimeout(this.mediaRefitTimer)
+    this.mediaRefitTimer = window.setTimeout(() => {
+      this.mediaRefitTimer = null
+      if (this.layoutLocked) return
+      this.containOverflowMediaAll()
+    }, 120)
   }
 
   /**
@@ -478,7 +493,8 @@ export class EpubEngine implements ReaderEngine {
 
     this.normalizeChapterTitles(doc)
     if (this.settings) {
-      this.applyThemeColorsToDocument(doc, this.settings, true)
+      // Defer contrast wash so first paint / first turn stay responsive on PC.
+      this.applyThemeColorsToDocument(doc, this.settings, true, { deferWashes: true })
       this.applyTypographyToDocument(doc, this.settings)
       this.scheduleThemeRepaint(doc)
     }
@@ -1761,8 +1777,8 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
     let marked = 0
     let visited = 0
     const w = typeof window !== 'undefined' ? window.innerWidth : 1200
-    // Cap style walks — full chapter trees with getComputedStyle freeze phones.
-    const maxVisit = w < 768 ? 140 : w < 1100 ? 220 : 360
+    // Cap style walks — getComputedStyle freezes illustrated chapters (PC included).
+    const maxVisit = w < 768 ? 140 : w < 1100 ? 200 : 260
 
     const isMedia = (tag: string) =>
       tag === 'img' ||
@@ -2009,14 +2025,17 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
   private scheduleThemeRepaint(doc: Document) {
     if (!this.settings) return
     const settings = this.settings
-    // Late publisher CSS + chapter scripts often paint after first frame on mobile WebKit.
-    // First tick: full wash. Later ticks: soft reassert only (avoids PC height thrash).
-    for (const [i, ms] of [0, 160, 500, 1400].entries()) {
+    const w = typeof window !== 'undefined' ? window.innerWidth : 1200
+    // PC: fewer late washes — illustrated chapters already cost a lot on first paint.
+    const ticks = w >= 1100 ? [0, 280] : [0, 160, 500, 1400]
+    for (const [i, ms] of ticks.entries()) {
       const timer = window.setTimeout(() => {
         this.themeRepaintTimers = this.themeRepaintTimers.filter((t) => t !== timer)
         if (!this.settings || this.settings !== settings) return
         if (!doc.defaultView || doc.defaultView.closed) return
-        this.applyThemeColorsToDocument(doc, settings, i === 0)
+        this.applyThemeColorsToDocument(doc, settings, i === 0, {
+          deferWashes: i > 0 || w >= 1100,
+        })
       }, ms)
       this.themeRepaintTimers.push(timer)
     }
@@ -2024,12 +2043,13 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
 
   /**
    * After page turn: ensure theme stylesheet is last and html/body colors stick.
-   * Full subtree rewrite only when the theme style is missing (new iframe).
+   * `light: true` skips the expensive publisher wash walk (use after relocate on PC).
    */
-  private reassertThemeColors(settings: ReaderSettings) {
+  private reassertThemeColors(settings: ReaderSettings, opts?: { light?: boolean }) {
     if (!this.rendition) return
     const { bg, fg, theme } = this.themeColors(settings)
-    const fp = `${theme}\0${bg}\0${fg}`
+    const flow = settings.pageTurn === 'scroll' ? 's' : 'p'
+    const fp = `${theme}\0${bg}\0${fg}\0${flow}`
     try {
       const contents = (
         this.rendition as unknown as { getContents?: () => ContentsDoc[] }
@@ -2039,7 +2059,9 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
         if (!doc) return
         const styleEl = doc.getElementById('qingyue-theme') as HTMLStyleElement | null
         if (!styleEl || doc.documentElement.dataset.qyTheme !== fp) {
-          this.applyThemeColorsToDocument(doc, settings, true)
+          this.applyThemeColorsToDocument(doc, settings, true, {
+            deferWashes: Boolean(opts?.light),
+          })
           return
         }
         this.themeApplyDepth += 1
@@ -2054,12 +2076,13 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
             body.style.setProperty('background-color', bg, 'important')
             body.style.setProperty('background-image', 'none', 'important')
             body.style.setProperty('color', fg, 'important')
-            this.paintPublisherWashes(doc, bg, fg)
+            if (!opts?.light) this.paintPublisherWashes(doc, bg, fg)
+            else this.schedulePublisherWashes(doc, bg, fg)
           }
           this.paintHostSurfaces(doc, bg)
         } finally {
           this.themeApplyDepth -= 1
-          this.themeQuietUntil = performance.now() + 220
+          this.themeQuietUntil = performance.now() + 160
         }
       })
     } catch {
