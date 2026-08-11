@@ -50,6 +50,13 @@ type ContentsDoc = {
   addStylesheetRules?: (rules: unknown) => void
 }
 
+type EpubViewLike = {
+  element?: HTMLElement
+  iframe?: HTMLIFrameElement
+  show?: () => void
+  emit?: (event: string, view: EpubViewLike) => void
+}
+
 export class EpubEngine implements ReaderEngine {
   readonly capabilities = FULL_ENGINE_CAPABILITIES
   private book: Book | null = null
@@ -106,13 +113,9 @@ export class EpubEngine implements ReaderEngine {
   private turning = false
   /** After turn settle: ignore snap/lock on echo relocates (SCROLLED → reportLocation). */
   private turnSettleUntil = 0
-  /**
-   * Chapter hop: skip epub.js clear() so the old view stays painted until the new
-   * section is RENDERED — then remove stale views (no overlay plate).
-   */
-  private swapKeepOld = false
-  private swapOldViews: unknown[] = []
-  private swapClearOrig: (() => void) | null = null
+  /** epub.js clear() ran during this turn — stage is hidden until RENDERED. */
+  private chapterCleared = false
+  private clearOrig: (() => void) | null = null
   private readonly mark = createMarkSurface({
     getDocs: () => {
       const contents = (
@@ -178,7 +181,7 @@ export class EpubEngine implements ReaderEngine {
       hooks: { content: { register: (fn: (contents: ContentsDoc) => void) => void } }
     }
     hooks.hooks.content.register((contents) => this.bindContentEvents(contents))
-    this.installChapterSwapGuard()
+    this.installChapterTurnGuard()
 
     const initial = opts?.initialLocator
     const displayTarget =
@@ -186,6 +189,16 @@ export class EpubEngine implements ReaderEngine {
         ? initial.cfi || initial.href || initial.spineIndex
         : undefined
     await this.rendition.display(displayTarget)
+
+    // Quiet-show patch for the initially displayed view(s).
+    try {
+      const views = (
+        this.rendition as unknown as { manager?: { views?: { all?: () => EpubViewLike[] } } }
+      ).manager?.views?.all?.()
+      views?.forEach((v) => this.quietViewShow(v))
+    } catch {
+      /* */
+    }
 
     // Fonts can wait until after first page is interactive (rewriteDocFonts also runs on mount).
     void remapBookCssFonts(this.book, this.fontUrlCache).catch((err) => {
@@ -233,91 +246,57 @@ export class EpubEngine implements ReaderEngine {
     this.scheduleLocationsGenerate()
   }
 
-  /** Keep old chapter painted during spine hop — epub.js otherwise clear()s to blank. */
-  private installChapterSwapGuard() {
+  /**
+   * Chapter hops: hide the stage before epub.js clear() blanks it, reveal once after
+   * RENDERED. Also strip iframe translateZ forced-reflow (extra flash on show).
+   */
+  private installChapterTurnGuard() {
     const mgr = (
       this.rendition as unknown as {
         manager?: {
           clear?: () => void
-          views?: { all?: () => unknown[] }
-          __qySwapGuard?: boolean
+          on?: (event: string, fn: (view: EpubViewLike) => void) => void
+          __qyTurnGuard?: boolean
         }
       }
     )?.manager
-    if (!mgr?.clear || mgr.__qySwapGuard) return
-    mgr.__qySwapGuard = true
-    this.swapClearOrig = mgr.clear.bind(mgr)
+    if (!mgr?.clear || mgr.__qyTurnGuard) return
+    mgr.__qyTurnGuard = true
+    this.clearOrig = mgr.clear.bind(mgr)
     mgr.clear = () => {
-      if (!this.swapKeepOld) {
-        this.swapClearOrig?.()
-        return
+      if (this.turning && this.container) {
+        // Hide before blank paint — parent stage keeps --reader-bg.
+        this.container.style.visibility = 'hidden'
+        this.chapterCleared = true
+      }
+      this.clearOrig?.()
+    }
+    mgr.on?.('added', (view) => this.quietViewShow(view))
+  }
+
+  private quietViewShow(view: EpubViewLike) {
+    if (!view || (view as { __qyQuietShow?: boolean }).__qyQuietShow) return
+    ;(view as { __qyQuietShow?: boolean }).__qyQuietShow = true
+    if (!view.show) return
+    view.show = () => {
+      try {
+        if (view.element) view.element.style.visibility = 'visible'
+        if (view.iframe) view.iframe.style.visibility = 'visible'
+        // Skip translateZ(0)+offsetWidth forced reflow — that flash stacked on chapter hops.
+      } catch {
+        /* */
       }
       try {
-        this.swapOldViews = mgr.views?.all?.()?.slice?.() || []
+        view.emit?.('shown', view)
       } catch {
-        this.swapOldViews = []
+        /* */
       }
-      // Intentionally skip hide/scrollTo/destroy — old page stays on screen.
     }
   }
 
-  private finishChapterSwap(dir: 'next' | 'prev') {
-    const mgr = (
-      this.rendition as unknown as {
-        manager?: {
-          ignore?: boolean
-          views?: {
-            all?: () => unknown[]
-            remove?: (view: unknown) => void
-          }
-          scrollTo?: (x: number, y: number, silent?: boolean) => void
-          container?: HTMLElement
-          layout?: { delta: number }
-        }
-      }
-    )?.manager
-    const olds = this.swapOldViews
-    this.swapOldViews = []
-    if (!mgr) return
-
-    const container = mgr.container
-    // Measure old strip while it is still mounted.
-    let oldW = 0
-    if (dir === 'next') {
-      for (const v of olds) {
-        try {
-          const view = v as { width?: () => number; element?: HTMLElement }
-          oldW += view.width?.() || view.element?.getBoundingClientRect().width || 0
-        } catch {
-          /* */
-        }
-      }
-    }
-
-    // One synchronous, silent commit: land on new → drop old → scrollLeft=0.
-    // Splitting remove + scrollTo across paints was the "flash twice" on chapter hops
-    // (e.g. 明朝那些事儿 → 第十一章).
-    mgr.ignore = true
-    try {
-      if (dir === 'next' && oldW > 0) {
-        mgr.scrollTo?.(oldW, 0, true)
-      }
-      for (const v of olds) {
-        try {
-          mgr.views?.remove?.(v)
-        } catch {
-          /* already gone */
-        }
-      }
-      if (dir === 'next') {
-        if (container) container.scrollLeft = 0
-        else mgr.scrollTo?.(0, 0, true)
-      } else if (container && mgr.layout) {
-        container.scrollLeft = Math.max(0, container.scrollWidth - mgr.layout.delta)
-      }
-    } catch {
-      /* */
-    }
+  private revealReaderStage() {
+    if (!this.container) return
+    this.container.style.removeProperty('visibility')
   }
 
   /**
@@ -373,63 +352,6 @@ export class EpubEngine implements ReaderEngine {
       if (this.layoutLocked || this.turning) return
       this.containOverflowMediaAll()
     }, 120)
-  }
-
-  /** True when next/prev will load another spine item (epub.js clear() blank gap). */
-  private willCrossSpine(dir: 'next' | 'prev'): boolean {
-    const mgr = (
-      this.rendition as unknown as {
-        manager?: {
-          isPaginated?: boolean
-          container?: HTMLElement
-          layout?: { delta: number; height: number }
-          settings?: { axis?: string; direction?: string; rtlScrollType?: string }
-          views?: { length: number; last: () => { section: { next: () => unknown } }; first: () => { section: { prev: () => unknown } } }
-        }
-      }
-    )?.manager
-    if (!mgr?.container || !mgr.views?.length || !mgr.layout) return false
-    if (!mgr.isPaginated) {
-      return dir === 'next'
-        ? Boolean(mgr.views.last()?.section?.next?.())
-        : Boolean(mgr.views.first()?.section?.prev?.())
-    }
-    const c = mgr.container
-    const axis = mgr.settings?.axis || 'horizontal'
-    const direction = mgr.settings?.direction || 'ltr'
-    if (axis === 'horizontal' && direction === 'ltr') {
-      if (dir === 'next') {
-        const left = c.scrollLeft + c.offsetWidth + mgr.layout.delta
-        return left > c.scrollWidth && Boolean(mgr.views.last()?.section?.next?.())
-      }
-      return c.scrollLeft <= 0 && Boolean(mgr.views.first()?.section?.prev?.())
-    }
-    if (axis === 'horizontal' && direction === 'rtl') {
-      if (mgr.settings?.rtlScrollType === 'default') {
-        if (dir === 'next') return c.scrollLeft <= 0 && Boolean(mgr.views.last()?.section?.next?.())
-        return (
-          c.scrollLeft + c.offsetWidth >= c.scrollWidth &&
-          Boolean(mgr.views.first()?.section?.prev?.())
-        )
-      }
-      if (dir === 'next') {
-        const left = c.scrollLeft + mgr.layout.delta * -1
-        return left <= c.scrollWidth * -1 && Boolean(mgr.views.last()?.section?.next?.())
-      }
-      return c.scrollLeft >= 0 && Boolean(mgr.views.first()?.section?.prev?.())
-    }
-    if (axis === 'vertical') {
-      if (dir === 'next') {
-        return (
-          c.scrollTop + c.offsetHeight >= c.scrollHeight &&
-          Boolean(mgr.views.last()?.section?.next?.())
-        )
-      }
-      return c.scrollTop <= 0 && Boolean(mgr.views.first()?.section?.prev?.())
-    }
-    return dir === 'next'
-      ? Boolean(mgr.views.last()?.section?.next?.())
-      : Boolean(mgr.views.first()?.section?.prev?.())
   }
 
   private waitRenditionEvent(event: 'relocated' | 'rendered', capMs: number): Promise<void> {
@@ -725,7 +647,7 @@ export class EpubEngine implements ReaderEngine {
       const settings = this.settings
       const run = () => {
         if (!this.settings || this.settings !== settings) return
-        if (this.turning || this.swapKeepOld) return
+        if (this.turning || this.chapterCleared) return
         if (!doc.defaultView || doc.defaultView.closed) return
         this.containOverflowMedia(doc)
         const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
@@ -1019,9 +941,8 @@ export class EpubEngine implements ReaderEngine {
     this.turnPump = null
     this.turning = false
     this.turnSettleUntil = 0
-    this.swapKeepOld = false
-    this.swapOldViews = []
-    this.swapClearOrig = null
+    this.chapterCleared = false
+    this.clearOrig = null
     this.layoutLocked = false
     this.locationsReady = false
     this.locationsGen += 1
@@ -1248,64 +1169,39 @@ export class EpubEngine implements ReaderEngine {
     }
     const textNovel = Boolean(this.bookProfile?.textNovel)
     const illustratedLarge = Boolean(this.bookProfile?.illustratedLarge)
-    const crossSpine = this.willCrossSpine(dir)
-    const settleCapMs = crossSpine
-      ? illustratedLarge || textNovel
-        ? 2000
-        : 2500
-      : textNovel || illustratedLarge
-        ? 160
-        : 280
 
     this.turning = true
     this.layoutLocked = true
-    this.swapKeepOld = crossSpine
-    this.swapOldViews = []
+    this.chapterCleared = false
+
+    const relocatedP = this.waitRenditionEvent('relocated', textNovel || illustratedLarge ? 200 : 320)
+    const renderedP = this.waitRenditionEvent('rendered', illustratedLarge || textNovel ? 2000 : 2500)
 
     try {
-      const settled = crossSpine
-        ? this.waitRenditionEvent('rendered', settleCapMs)
-        : this.waitRenditionEvent('relocated', settleCapMs)
-
       if (dir === 'next') await rendition.next()
       else await rendition.prev()
-      await settled
 
-      await new Promise<void>((r) => requestAnimationFrame(() => r()))
-      if (crossSpine) {
-        this.finishChapterSwap(dir)
-        // Already positioned in finishChapterSwap — snap here causes a second paint.
+      if (this.chapterCleared) {
+        // Stage is visibility:hidden since clear(). Wait theme+show, then reveal once.
+        await renderedP
+        await new Promise<void>((r) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => r())),
+        )
+        this.revealReaderStage()
       } else {
+        await relocatedP
+        await new Promise<void>((r) => requestAnimationFrame(() => r()))
         this.snapPaginatedScroll()
       }
       if (!textNovel && !illustratedLarge) this.clearTurnArtifacts()
     } catch {
       /* at bound / destroyed */
     } finally {
-      if (this.swapOldViews.length) {
-        const mgr = (
-          this.rendition as unknown as {
-            manager?: { views?: { all?: () => unknown[] } }
-          }
-        )?.manager
-        const all = mgr?.views?.all?.() || []
-        const olds = this.swapOldViews
-        const hasNew = all.some((v) => !olds.includes(v))
-        if (hasNew) {
-          try {
-            this.finishChapterSwap(dir)
-          } catch {
-            this.swapClearOrig?.()
-          }
-        } else {
-          // Append failed — keep the still-visible old chapter.
-          this.swapOldViews = []
-        }
-      }
-      this.swapKeepOld = false
+      this.revealReaderStage()
+      this.chapterCleared = false
       this.turning = false
       this.layoutLocked = false
-      this.turnSettleUntil = performance.now() + (crossSpine ? 140 : 100)
+      this.turnSettleUntil = performance.now() + 120
     }
   }
 
@@ -2385,7 +2281,7 @@ ${settings.pageTurn === 'scroll' ? '' : paginatedMediaCss()}
       const timer = window.setTimeout(() => {
         this.themeRepaintTimers = this.themeRepaintTimers.filter((t) => t !== timer)
         if (!this.settings || this.settings !== settings) return
-        if (this.turning || this.swapKeepOld) return
+        if (this.turning || this.chapterCleared) return
         if (!doc.defaultView || doc.defaultView.closed) return
         this.applyThemeColorsToDocument(doc, settings, i === 0, {
           deferWashes: i > 0 || w >= 1100,
