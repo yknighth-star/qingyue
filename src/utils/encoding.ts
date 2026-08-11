@@ -26,34 +26,61 @@ function looksLikeUtf8(bytes: Uint8Array): boolean {
   return true
 }
 
-export async function decodeTextBlob(blob: Blob, preferred?: string): Promise<{ text: string; encoding: string }> {
-  const buf = await blob.arrayBuffer()
-  const bytes = new Uint8Array(buf)
+/** Score a decoded sample — prefer encodings that keep CJK and avoid replacement chars. */
+function scoreDecodedSample(text: string): number {
+  let bad = 0
+  let cjk = 0
+  const n = Math.min(text.length, 4000)
+  for (let i = 0; i < n; i++) {
+    const c = text.charCodeAt(i)
+    if (c === 0xfffd) bad += 3
+    else if (c >= 0x4e00 && c <= 0x9fff) cjk++
+  }
+  return cjk - bad * 8
+}
 
+function detectEncoding(bytes: Uint8Array, preferred?: string): string {
   if (preferred) {
     try {
-      return { text: new TextDecoder(preferred).decode(bytes), encoding: preferred }
+      new TextDecoder(preferred)
+      return preferred
     } catch {
       /* fall through */
     }
   }
 
-  if (hasUtf8Bom(bytes) || looksLikeUtf8(bytes.slice(0, Math.min(bytes.length, 256 * 1024)))) {
-    return { text: new TextDecoder('utf-8').decode(bytes), encoding: 'utf-8' }
-  }
+  const sample = bytes.subarray(0, Math.min(bytes.length, 256 * 1024))
+  if (hasUtf8Bom(bytes) || looksLikeUtf8(sample)) return 'utf-8'
 
-  for (const enc of ['gb18030', 'gbk', 'gb2312']) {
+  let best = 'gb18030'
+  let bestScore = -Infinity
+  for (const enc of ['gb18030', 'gbk', 'gb2312'] as const) {
     try {
-      const text = new TextDecoder(enc).decode(bytes)
-      if (!text.includes('\uFFFD') || enc === 'gb18030') {
-        return { text, encoding: enc }
+      const text = new TextDecoder(enc).decode(sample)
+      const score = scoreDecodedSample(text)
+      if (score > bestScore) {
+        bestScore = score
+        best = enc
       }
     } catch {
       /* ignore */
     }
   }
+  return best
+}
 
-  return { text: new TextDecoder('utf-8', { fatal: false }).decode(bytes), encoding: 'utf-8' }
+export async function decodeTextBlob(
+  blob: Blob,
+  preferred?: string,
+): Promise<{ text: string; encoding: string }> {
+  const buf = await blob.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  const encoding = detectEncoding(bytes, preferred)
+  try {
+    return { text: new TextDecoder(encoding).decode(bytes), encoding }
+  } catch {
+    return { text: new TextDecoder('utf-8', { fatal: false }).decode(bytes), encoding: 'utf-8' }
+  }
 }
 
 const CHAPTER_RE =

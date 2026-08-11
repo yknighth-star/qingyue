@@ -6,7 +6,7 @@ import { confirmDialog } from '@/composables/useConfirm'
 import { booksRepo } from '@/repos'
 import { extractCoverAndMeta } from '@/storage/meta'
 import { normalizeAuthor } from '@/utils/author'
-import { isPlaceholderTitle, pickBookTitle } from '@/utils/bookMeta'
+import { isPlaceholderTitle, pickBookAuthor, pickBookTitle } from '@/utils/bookMeta'
 import type { BookRecord } from '@/types'
 
 export function useShelfActions() {
@@ -237,10 +237,18 @@ export function useShelfActions() {
       try {
         const blob = await booksRepo.getBlob(b.id)
         if (!blob) continue
-        const meta = await extractCoverAndMeta(blob, b.format)
-        if (!meta.cover) continue
-        await booksRepo.update(b.id, { cover: meta.cover })
-        b.cover = meta.cover
+        const meta = await extractCoverAndMeta(blob, b.format, { mode: 'full' })
+        const patch: Partial<BookRecord> = {}
+        if (meta.cover) patch.cover = meta.cover
+        if (meta.title && (isPlaceholderTitle(b.title) || /\.(epub|pdf|txt)$/i.test(b.title))) {
+          patch.title = pickBookTitle(meta.title, b.title)
+        }
+        if (meta.author && (!b.author || normalizeAuthor(b.author) === '未知')) {
+          patch.author = pickBookAuthor(meta.author)
+        }
+        if (!Object.keys(patch).length) continue
+        await booksRepo.update(b.id, patch)
+        Object.assign(b, patch)
         updated++
         if (updated % 2 === 0) rebuildCovers()
       } catch (err) {

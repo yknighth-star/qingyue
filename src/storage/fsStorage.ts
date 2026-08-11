@@ -12,6 +12,7 @@ import { idbStorage } from './idbStorage'
 import { extractCoverAndMeta } from './meta'
 import { tagsWithAutoFolder } from '@/utils/shelfTags'
 import { pickBookAuthor, pickBookTitle } from '@/utils/bookMeta'
+import { rememberBookBlob } from '@/utils/bookBlobCache'
 
 const ROOT_ID = 'default'
 
@@ -134,7 +135,7 @@ export async function scanLibraryFolder(): Promise<ImportResult[]> {
       results.push({ book: dup, duplicated: true })
       continue
     }
-    const meta = await extractCoverAndMeta(file, format)
+    const meta = await extractCoverAndMeta(file, format, { mode: 'quick' })
     const book: BookRecord = {
       id: uid('book'),
       title: pickBookTitle(meta.title, path.split('/').pop() || path),
@@ -152,6 +153,8 @@ export async function scanLibraryFolder(): Promise<ImportResult[]> {
       updatedAt: Date.now(),
     }
     await booksRepo.put(book)
+    // Keep File handle blob warm so first open after scan skips a second FS round-trip.
+    rememberBookBlob(book.id, file)
     existing.push(book)
     results.push({ book })
   }

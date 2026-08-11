@@ -60,6 +60,7 @@ export class EpubEngine implements ReaderEngine {
   /** EPUB locations.generate finished — enables book-level page estimates. */
   private locationsReady = false
   private locationsGen = 0
+  private locationsTimer: number | null = null
   private progressCb: ((p: ReadingProgress) => void) | null = null
   private wheelCb: ((deltaY: number) => void) | null = null
   private tapCb: ((e: ContentTapEvent) => void) | null = null
@@ -204,19 +205,44 @@ export class EpubEngine implements ReaderEngine {
     })
 
     // Background location map → stable book-level 当前/总页 (estimate).
+    // Defer on phone/tablet / low-power so first paint and theme wash are not contending.
     this.locationsReady = false
     const gen = ++this.locationsGen
-    const locations = (this.book as Book & { locations?: { generate?: (chars: number) => Promise<unknown> } })
-      .locations
-    void locations?.generate?.(1600)
-      ?.then(() => {
-        if (gen !== this.locationsGen) return
-        this.locationsReady = true
-        this.progressCb?.(this.getProgress())
-      })
-      .catch(() => {
-        /* optional — fall back to section / spine pages */
-      })
+    if (this.locationsTimer) {
+      window.clearTimeout(this.locationsTimer)
+      this.locationsTimer = null
+    }
+    const w = typeof window !== 'undefined' ? window.innerWidth : 1200
+    const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 8 : 8
+    const lite = w < 1100 || cores <= 4
+    const delayMs = lite ? 2200 : 600
+    // Larger stride → fewer location points → cheaper generate on weak devices.
+    const charsPerLoc = lite ? 2400 : 1600
+    this.locationsTimer = window.setTimeout(() => {
+      this.locationsTimer = null
+      if (gen !== this.locationsGen || !this.book) return
+      const start = () => {
+        if (gen !== this.locationsGen || !this.book) return
+        const locations = (
+          this.book as Book & { locations?: { generate?: (chars: number) => Promise<unknown> } }
+        ).locations
+        void locations
+          ?.generate?.(charsPerLoc)
+          ?.then(() => {
+            if (gen !== this.locationsGen) return
+            this.locationsReady = true
+            this.progressCb?.(this.getProgress())
+          })
+          .catch(() => {
+            /* optional — fall back to section / spine pages */
+          })
+      }
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(() => start(), { timeout: 2000 })
+      } else {
+        start()
+      }
+    }, delayMs)
   }
 
   /**
@@ -742,6 +768,10 @@ export class EpubEngine implements ReaderEngine {
     this.rendition = null
     this.locationsReady = false
     this.locationsGen += 1
+    if (this.locationsTimer) {
+      window.clearTimeout(this.locationsTimer)
+      this.locationsTimer = null
+    }
     this.selectionCb = null
     this.tapCb = null
     this.gestureCb = null

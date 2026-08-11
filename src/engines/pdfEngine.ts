@@ -64,6 +64,7 @@ export class PdfEngine implements ReaderEngine {
   /** Pages whose textCache entry came from OCR. */
   private ocrPages = new Set<number>()
   private needsOcrCache: boolean | null = null
+  private sourceUrl: string | null = null
   /** Soft cap so mobile OCR does not run forever on huge scans. */
   private static readonly OCR_PAGE_CAP = 80
 
@@ -78,8 +79,18 @@ export class PdfEngine implements ReaderEngine {
     container.className = 'pdf-reader'
     applyThemeVars(container, effectiveTheme(settings), settings)
 
-    const data = await blob.arrayBuffer()
-    this.pdf = await pdfjs.getDocument({ data }).promise
+    // Blob URL: worker can stream/parse without an extra full ArrayBuffer copy on the main heap.
+    this.sourceUrl = URL.createObjectURL(blob)
+    try {
+      this.pdf = await pdfjs.getDocument({
+        url: this.sourceUrl,
+        disableStream: false,
+        disableAutoFetch: false,
+      }).promise
+    } catch (err) {
+      this.revokeSourceUrl()
+      throw err
+    }
     this.page = 1
 
     const pages = document.createElement('div')
@@ -187,10 +198,22 @@ export class PdfEngine implements ReaderEngine {
     this.pageHeights.clear()
     this.pdf?.destroy()
     this.pdf = null
+    this.revokeSourceUrl()
     if (this.container) this.container.innerHTML = ''
     this.container = null
     this.pagesEl = null
     this.lastRenderKey = ''
+  }
+
+  private revokeSourceUrl() {
+    if (this.sourceUrl) {
+      try {
+        URL.revokeObjectURL(this.sourceUrl)
+      } catch {
+        /* */
+      }
+      this.sourceUrl = null
+    }
   }
 
   applySettings(settings: ReaderSettings) {

@@ -11,6 +11,7 @@ import type {
   ShelfFilter,
   ShelfSort,
 } from '@/types'
+import { clearBookBlobCache, forgetBookBlob, peekBookBlob, rememberBookBlob } from '@/utils/bookBlobCache'
 
 export const useBooksStore = defineStore('books', () => {
   const platform = getPlatform()
@@ -146,6 +147,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   async function remove(id: string) {
+    forgetBookBlob(id)
     await booksRepo.delete(id)
     await refresh()
   }
@@ -211,6 +213,7 @@ export const useBooksStore = defineStore('books', () => {
           })
         }
         await booksRepo.delete(d.id)
+        forgetBookBlob(d.id)
         removed++
       }
     }
@@ -229,6 +232,7 @@ export const useBooksStore = defineStore('books', () => {
     searchQuery.value = ''
     formatFilter.value = 'all'
     progressFilter.value = 'all'
+    clearBookBlobCache()
 
     for (const id of ids) {
       try {
@@ -248,7 +252,11 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   async function getBlob(id: string) {
-    return booksRepo.getBlob(id)
+    const cached = peekBookBlob(id)
+    if (cached) return cached
+    const blob = await booksRepo.getBlob(id)
+    if (blob) rememberBookBlob(id, blob)
+    return blob
   }
 
   async function saveProgress(bookId: string, locator: ProgressRecord['locator'], percent: number) {

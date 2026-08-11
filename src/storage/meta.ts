@@ -10,19 +10,27 @@ export interface MetaResult {
   cover?: Blob
 }
 
-export async function extractCoverAndMeta(file: Blob, format: BookFormat): Promise<MetaResult> {
+/** quick = title/author only (import); full = + cover (idle backfill / repair). */
+export type MetaExtractMode = 'quick' | 'full'
+
+export async function extractCoverAndMeta(
+  file: Blob,
+  format: BookFormat,
+  opts?: { mode?: MetaExtractMode },
+): Promise<MetaResult> {
+  const mode = opts?.mode ?? 'full'
   try {
-    if (format === 'epub') return await extractEpubMeta(file)
-    if (format === 'pdf') return await extractPdfMeta(file)
-    if (format === 'txt') return await extractTxtMeta(file)
+    if (format === 'epub') return await extractEpubMeta(file, mode)
+    if (format === 'pdf') return await extractPdfMeta(file, mode)
+    if (format === 'txt') return await extractTxtMeta(file, mode)
   } catch (err) {
     console.warn('Cover/meta extract failed', format, err)
   }
   return {}
 }
 
-async function extractTxtMeta(file: Blob): Promise<MetaResult> {
-  // Peek first lines for a rough title; cover is a generated title card
+async function extractTxtMeta(file: Blob, mode: MetaExtractMode): Promise<MetaResult> {
+  // Peek first lines for a rough title; cover is a generated title card (full only)
   let hint = ''
   try {
     const sample = (await file.slice(0, 2048).text()).replace(/^\uFEFF/, '')
@@ -34,16 +42,24 @@ async function extractTxtMeta(file: Blob): Promise<MetaResult> {
   } catch {
     /* */
   }
+  if (mode === 'quick') return { title: undefined, author: undefined }
   const cover = await renderTitleCover(hint || 'TXT')
   return { title: undefined, author: undefined, cover }
 }
 
-async function extractPdfMeta(file: Blob): Promise<MetaResult> {
+async function extractPdfMeta(file: Blob, mode: MetaExtractMode): Promise<MetaResult> {
   const pdfjs = await import('pdfjs-dist')
   pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER_SRC
-  const data = new Uint8Array(await file.arrayBuffer())
-  const pdf = await pdfjs.getDocument({ data, disableAutoFetch: true, disableStream: true }).promise
+  // Blob URL avoids an extra ArrayBuffer copy of the whole PDF on the JS heap.
+  const url = URL.createObjectURL(file)
+  let pdf: import('pdfjs-dist').PDFDocumentProxy | null = null
   try {
+    pdf = await pdfjs.getDocument({
+      url,
+      // Cover/meta only needs page 1 + info dict; allow stream so worker can start early.
+      disableAutoFetch: mode === 'quick',
+      disableStream: false,
+    }).promise
     let title: string | undefined
     let author: string | undefined
     try {
@@ -55,10 +71,14 @@ async function extractPdfMeta(file: Blob): Promise<MetaResult> {
       /* metadata optional */
     }
 
+    if (mode === 'quick') return { title, author }
+
     const page = await pdf.getPage(1)
     const base = page.getViewport({ scale: 1 })
-    const targetW = 280
-    const scale = Math.min(2, targetW / Math.max(1, base.width))
+    // Smaller cover on phone-class viewports; desktop can afford a bit more detail.
+    const phone = typeof window !== 'undefined' && window.innerWidth < 768
+    const targetW = phone ? 160 : 220
+    const scale = Math.min(phone ? 1.25 : 1.6, targetW / Math.max(1, base.width))
     const viewport = page.getViewport({ scale })
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d', { alpha: false })
@@ -74,20 +94,21 @@ async function extractPdfMeta(file: Blob): Promise<MetaResult> {
       intent: 'display',
     }).promise
 
-    const cover = await canvasToBlob(canvas, 'image/jpeg', 0.84)
+    const cover = await canvasToBlob(canvas, 'image/jpeg', phone ? 0.72 : 0.8)
     canvas.width = 0
     canvas.height = 0
     return { title, author, cover }
   } finally {
+    URL.revokeObjectURL(url)
     try {
-      await pdf.destroy()
+      await pdf?.destroy()
     } catch {
       /* */
     }
   }
 }
 
-async function extractEpubMeta(file: Blob): Promise<MetaResult> {
+async function extractEpubMeta(file: Blob, mode: MetaExtractMode): Promise<MetaResult> {
   const zip = await JSZip.loadAsync(file)
   const container = await zipReadText(zip, 'META-INF/container.xml')
   if (!container) return {}
@@ -99,6 +120,8 @@ async function extractEpubMeta(file: Blob): Promise<MetaResult> {
   const title = sanitizeMetaTitle(opf.match(/<dc:title[^>]*>([^<]+)<\/dc:title>/i)?.[1])
   const author =
     normalizeAuthor(opf.match(/<dc:creator[^>]*>([^<]+)<\/dc:creator>/i)?.[1]) || undefined
+
+  if (mode === 'quick') return { title, author }
 
   const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : ''
   const items = parseManifestItems(opf)

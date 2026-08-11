@@ -11,6 +11,7 @@ import {
 } from './types'
 import { extractCoverAndMeta } from './meta'
 import { pickBookAuthor, pickBookTitle } from '@/utils/bookMeta'
+import { rememberBookBlob } from '@/utils/bookBlobCache'
 
 export const idbStorage: LibraryStorage = {
   kind: 'idb',
@@ -36,7 +37,8 @@ export const idbStorage: LibraryStorage = {
         results.push({ book: dup, duplicated: true })
         continue
       }
-      const meta = await extractCoverAndMeta(file, format)
+      // Quick meta only — covers fill in on idle backfill so import stays snappy on phone.
+      const meta = await extractCoverAndMeta(file, format, { mode: 'quick' })
       const book: BookRecord = {
         id: uid('book'),
         title: pickBookTitle(meta.title, file.name),
@@ -53,6 +55,7 @@ export const idbStorage: LibraryStorage = {
         updatedAt: Date.now(),
       }
       await booksRepo.putWithBlob(book, file, file.name)
+      rememberBookBlob(book.id, file)
       results.push({ book })
     }
     return results

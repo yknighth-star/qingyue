@@ -47,6 +47,13 @@ export class TxtEngine implements ReaderEngine {
     this.settings = settings
     this.pageTurn = settings.pageTurn
     const { text } = await decodeTextBlob(blob)
+    // Yield once on large texts so the open hint can paint before chapter split + DOM.
+    if (text.length > 800_000) {
+      await new Promise<void>((r) => {
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => r())
+        else setTimeout(r, 0)
+      })
+    }
     this.text = text
     this.chapters = splitTxtChapters(text)
     this.chapterId = 0

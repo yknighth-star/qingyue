@@ -56,7 +56,7 @@ export function useReaderSession(opts: {
   async function open() {
     error.value = ''
     opening.value = true
-    openHint.value = '正在读取文件…'
+    openHint.value = '正在打开…'
     try {
       await books.refresh()
       await settingsStore.load()
@@ -66,7 +66,8 @@ export function useReaderSession(opts: {
         error.value = '未找到文件'
         return
       }
-      openHint.value = '正在加载文件数据…'
+      openHint.value = '正在加载文件…'
+      await nextTick()
       const blob = await books.getBlob(b.id)
       if (!blob) {
         error.value = b.storage === 'fs' ? '无法读取，请重新关联目录' : '书籍缺失'
@@ -75,10 +76,11 @@ export function useReaderSession(opts: {
 
       openHint.value =
         b.format === 'pdf'
-          ? '正在解析 PDF（优先显示首页）…'
+          ? '正在解析 PDF（优先首页）…'
           : b.format === 'epub'
             ? '正在解析 EPUB…'
             : '正在加载文本…'
+      await nextTick()
 
       const eng = createEngine(b.format)
       await nextTick()
