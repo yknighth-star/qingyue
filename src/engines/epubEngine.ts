@@ -265,6 +265,7 @@ export class EpubEngine implements ReaderEngine {
     const mgr = (
       this.rendition as unknown as {
         manager?: {
+          ignore?: boolean
           views?: {
             all?: () => unknown[]
             remove?: (view: unknown) => void
@@ -278,19 +279,41 @@ export class EpubEngine implements ReaderEngine {
     const olds = this.swapOldViews
     this.swapOldViews = []
     if (!mgr) return
-    for (const v of olds) {
-      try {
-        mgr.views?.remove?.(v)
-      } catch {
-        /* already gone */
+
+    const container = mgr.container
+    // Measure old strip while it is still mounted.
+    let oldW = 0
+    if (dir === 'next') {
+      for (const v of olds) {
+        try {
+          const view = v as { width?: () => number; element?: HTMLElement }
+          oldW += view.width?.() || view.element?.getBoundingClientRect().width || 0
+        } catch {
+          /* */
+        }
       }
     }
+
+    // One synchronous, silent commit: land on new → drop old → scrollLeft=0.
+    // Splitting remove + scrollTo across paints was the "flash twice" on chapter hops
+    // (e.g. 明朝那些事儿 → 第十一章).
+    mgr.ignore = true
     try {
+      if (dir === 'next' && oldW > 0) {
+        mgr.scrollTo?.(oldW, 0, true)
+      }
+      for (const v of olds) {
+        try {
+          mgr.views?.remove?.(v)
+        } catch {
+          /* already gone */
+        }
+      }
       if (dir === 'next') {
-        mgr.scrollTo?.(0, 0, true)
-      } else if (mgr.container && mgr.layout) {
-        const x = Math.max(0, mgr.container.scrollWidth - mgr.layout.delta)
-        mgr.scrollTo?.(x, 0, true)
+        if (container) container.scrollLeft = 0
+        else mgr.scrollTo?.(0, 0, true)
+      } else if (container && mgr.layout) {
+        container.scrollLeft = Math.max(0, container.scrollWidth - mgr.layout.delta)
       }
     } catch {
       /* */
@@ -695,29 +718,30 @@ export class EpubEngine implements ReaderEngine {
     }
     // After theme so title centering does not flash unthemed publisher layout first.
     this.normalizeChapterTitles(doc)
-    if (!textNovel) {
-      this.containOverflowMedia(doc)
-      if (!illustratedLarge) {
+    if (textNovel) {
+      /* light path */
+    } else if (illustratedLarge) {
+      // Media fit + fonts off the reveal frame — sync fit reflows columns = second flash.
+      const settings = this.settings
+      const run = () => {
+        if (!this.settings || this.settings !== settings) return
+        if (this.turning || this.swapKeepOld) return
+        if (!doc.defaultView || doc.defaultView.closed) return
+        this.containOverflowMedia(doc)
         const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
         this.mediaRefitDisposers.push(disposeRefit)
         void this.rewriteDocFonts(doc)
-      } else {
-        // Fonts/refit off the critical path — never stack on the turn frame.
-        const settings = this.settings
-        const run = () => {
-          if (!this.settings || this.settings !== settings) return
-          if (this.turning || this.swapKeepOld) return
-          if (!doc.defaultView || doc.defaultView.closed) return
-          const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
-          this.mediaRefitDisposers.push(disposeRefit)
-          void this.rewriteDocFonts(doc)
-        }
-        if (typeof requestIdleCallback === 'function') {
-          requestIdleCallback(() => run(), { timeout: 1200 })
-        } else {
-          window.setTimeout(run, 400)
-        }
       }
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(() => run(), { timeout: 1200 })
+      } else {
+        window.setTimeout(run, 400)
+      }
+    } else {
+      this.containOverflowMedia(doc)
+      const disposeRefit = bindMediaLoadRefit(doc, () => this.scheduleMediaReflow())
+      this.mediaRefitDisposers.push(disposeRefit)
+      void this.rewriteDocFonts(doc)
     }
     this.syncDocTouchAction(doc)
 
@@ -1248,8 +1272,12 @@ export class EpubEngine implements ReaderEngine {
       await settled
 
       await new Promise<void>((r) => requestAnimationFrame(() => r()))
-      if (crossSpine) this.finishChapterSwap(dir)
-      this.snapPaginatedScroll()
+      if (crossSpine) {
+        this.finishChapterSwap(dir)
+        // Already positioned in finishChapterSwap — snap here causes a second paint.
+      } else {
+        this.snapPaginatedScroll()
+      }
       if (!textNovel && !illustratedLarge) this.clearTurnArtifacts()
     } catch {
       /* at bound / destroyed */
